@@ -98,7 +98,12 @@ $alerts = new SecurityAlerts(array(
     'line_channel_access_token' => 'demo',
     'line_to'    => array('Udemo'),
     'clock'      => function () use (&$clock) { return $clock; },
-    'transport'  => function ($url, $headers, $body) use (&$sent) {
+    'transport'  => function ($url, $headers, $body, $method = 'POST') use (&$sent) {
+        if ($method === 'GET')
+        {
+            /* the weekly check-in asks LINE how much of the month's allowance is used; pretend 37 of 200 */
+            return array(200, substr($url, -18) === '/quota/consumption' ? '{"totalUsage":37}' : '{"type":"limited","value":200}');
+        }
         $j = json_decode($body, true);
         $sent[] = $j['messages'][0]['text'];
         return array(200, '{}');

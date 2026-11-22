@@ -1,0 +1,38 @@
+# Changelog / 更新紀錄
+
+## 1.1.0 — 2026-11-23
+
+- **LINE allowance in the weekly check-in.** Once a week the module asks LINE how many messages the
+  account has sent this month and what its limit is, and adds one line; from 80% it is a warning.
+  `line_quota_check => false` turns it off.
+  每週報平安多一行「這個月 LINE 大約發了幾則、上限幾則」，用到八成會警告。
+- **`--status`** (and `status()` in the library): where things stand — last run, where alerts go,
+  what is waiting to be re-sent, files watched, the current fingerprint, the latest findings — and
+  `!!` lines for whatever needs a look. Read-only; prints no token, recipient or check-in address.
+  新增「現在狀況」指令，只看不動。
+- A custom `transport` callable now receives the HTTP method as a fourth argument (`'GET'` for the
+  allowance lookup, `'POST'` for messages). Existing three-argument callables keep working.
+- `SECURITY.md` (how to report a vulnerability privately) and this changelog.
+- Self-test: 170 checks. CI: `actions/checkout@v7`.
+
+Upgrading from 1.0.0: replace `lib/SecurityAlerts.php` (and the cron entry if you want `--status`).
+No change to the records; nothing is re-reported.
+
+## 1.0.0 — 2026-11-22
+
+First public release.
+
+- Alerts on LINE (e-mail fallback, or your own channel through `notifier`) for: failed and new-device
+  admin logins, admin account changes, new / changed / deleted code files, code in upload folders,
+  web-shell patterns, edits with the modification time put back, firewall bursts, unusual staff
+  refunds / cancellations / balance adjustments, and your own `custom()` checks.
+- Quiet by design: one message per run, a quiet window per finding, a daily cap (URGENT bypasses it),
+  first run is a silent baseline.
+- Watches itself: weekly check-in with a fingerprint of all code files, alerts when its records are
+  wiped or reset, optional outside check-in address (`ping_url`), alerts that could not be delivered
+  are re-sent later.
+- File fingerprints are SHA-256; a weekly full re-read; `--audit`, `--fingerprint`, `--manifest`,
+  `scripts/fingerprint.php`; your own rules (`extra_rules`, `disable_rules`).
+- Optional, off by default: quarantine (rename, never delete) of new program files in upload folders.
+- Names that are not UTF-8 (old Big5 / GBK / Latin-1 folders and accounts) are handled; `input_charset`.
+- One PHP file, no database tables, PHP 7.4+; self-test, demo and a fake LINE server included.

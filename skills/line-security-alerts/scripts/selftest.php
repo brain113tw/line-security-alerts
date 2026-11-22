@@ -59,6 +59,19 @@ function rrmdir($d)
     rmdir($d);
 }
 
+/**
+ * The fake LINE's answer to "how many messages may I send this month / how many have I sent".
+ * $box['quota']: not set = a plan without a limit; array(used, limit); 'down' = LINE does not answer.
+ */
+function fake_quota($url, &$box)
+{
+    $box['gets'] = (isset($box['gets']) ? $box['gets'] : 0) + 1;
+    $q = isset($box['quota']) ? $box['quota'] : null;
+    if ($q === 'down') { return array(500, ''); }
+    if (substr($url, -18) === '/quota/consumption') { return array(200, json_encode(array('totalUsage' => $q ? $q[0] : 0))); }
+    return array(200, json_encode($q ? array('type' => 'limited', 'value' => $q[1]) : array('type' => 'none')));
+}
+
 /** Builds an instance wired to a fake clock + fake LINE. $box collects what was "sent". */
 function make(&$box, &$clock, array $extra = array())
 {
@@ -70,7 +83,8 @@ function make(&$box, &$clock, array $extra = array())
         'line_to' => array('Uxxxxxxxx'),
         'mail_to' => 'owner@example.com',
         'clock' => function () use (&$clock) { return $clock; },
-        'transport' => function ($url, $headers, $body) use (&$box) {
+        'transport' => function ($url, $headers, $body, $method = 'POST') use (&$box) {
+            if ($method === 'GET') { return fake_quota($url, $box); }
             $box['line'][] = json_decode($body, true)['messages'][0]['text'];
             return array($box['status'], '{}');
         },
@@ -700,7 +714,8 @@ $pingCfg = array('timezone' => 'UTC', 'state_dir' => $state8, 'ping_url' => $sec
         if ($pingAnswer === 'throw') { throw new RuntimeException('network down'); }
         return $pingAnswer;
     });
-$lineTransport = function ($url, $headers, $body) use (&$box, &$order) {
+$lineTransport = function ($url, $headers, $body, $method = 'POST') use (&$box, &$order) {
+    if ($method === 'GET') { return fake_quota($url, $box); }
     $order[] = 'line';
     $j = json_decode($body, true);
     $box['line'][] = $j['messages'][0]['text'];
@@ -935,7 +950,8 @@ check('disable_rules = stealth: the same edit is reported as an ordinary change'
 echo "Alerts that could not be delivered are sent later\n";
 /* A transport that keeps only what "LINE" accepted, and counts the attempts. */
 $attempts = 0;
-$strict = function ($url, $headers, $body) use (&$box, &$attempts) {
+$strict = function ($url, $headers, $body, $method = 'POST') use (&$box, &$attempts) {
+    if ($method === 'GET') { return fake_quota($url, $box); }
     $attempts++;
     if ($box['status'] >= 300) { return array($box['status'], '{}'); }
     $j = json_decode($body, true);
@@ -1087,6 +1103,114 @@ if (PHP_OS_FAMILY !== 'Windows')
 else
 {
     echo "  skip a real file with a non-UTF-8 name (Windows file names are always Unicode; this part only runs on Linux)\n";
+}
+
+/* ------------------------------------------------------------------ */
+echo "LINE's monthly allowance in the weekly check-in\n";
+$clock = strtotime('2026-03-02 10:00:00 UTC');
+$a = make($box, $clock, array('timezone' => 'UTC'));
+$a->run();
+$box['quota'] = array(120, 200);
+$clock = strtotime('2026-03-09 10:00:00 UTC'); $a->run();
+$m = isset($box['line'][0]) ? $box['line'][0] : '';
+check('the check-in says how many LINE messages are used this month', count($box['line']) === 1 && strpos($m, 'LINE messages this month: about 120 of 200 used.') !== false
+    && strpos($m, '⚠') === false, $m);
+$box['quota'] = array(170, 200);
+$clock = strtotime('2026-03-16 10:00:00 UTC'); $a->run();
+$m = isset($box['line'][1]) ? $box['line'][1] : '';
+check('80% used: a warning line, and the check-in is marked "something to look at"', strpos($m, '⚠ LINE messages this month: about 170 of 200 used.') !== false
+    && strpos($m, 'something to look at') !== false, $m);
+$box['quota'] = array(203, 200);
+$clock = strtotime('2026-03-23 10:00:00 UTC'); $a->run();
+$m = isset($box['line'][2]) ? $box['line'][2] : '';
+check('used up: says the limit is reached', strpos($m, 'the limit of 200 is used up') !== false && strpos($m, 'something to look at') !== false, $m);
+unset($box['quota']);
+$clock = strtotime('2026-03-30 10:00:00 UTC'); $a->run();
+$m = isset($box['line'][3]) ? $box['line'][3] : '';
+check('a plan without a limit: no line about it', count($box['line']) === 4 && strpos($m, 'LINE messages this month') === false && strpos($m, 'Weekly check-in |') !== false, $m);
+$box['quota'] = 'down';
+$clock = strtotime('2026-04-06 10:00:00 UTC'); $r = $a->run();
+$m = isset($box['line'][4]) ? $box['line'][4] : '';
+check('LINE does not answer the question: the check-in goes out anyway, without that line', $r['heartbeat'] === 'line' && count($box['line']) === 5
+    && strpos($m, 'LINE messages this month') === false, $m);
+$before = $box['gets'];
+$clock += 300; $a->run();
+check('LINE is only asked when a check-in is actually sent (not on every run)', $box['gets'] === $before, $box['gets'] - $before);
+
+$clock = strtotime('2026-03-02 10:00:00 UTC');
+$a = make($box, $clock, array('timezone' => 'UTC', 'line_quota_check' => false));
+$a->run();
+$box['quota'] = array(120, 200);
+$clock = strtotime('2026-03-09 10:00:00 UTC'); $a->run();
+check('line_quota_check = false: LINE is never asked', count($box['line']) === 1 && !isset($box['gets']) && strpos($box['line'][0], 'LINE messages this month') === false,
+    json_encode($box));
+
+/* ------------------------------------------------------------------ */
+echo "status(): where things stand\n";
+$clock = strtotime('2026-03-02 10:00:00 UTC');
+$site13 = tmpdir('site13');
+$state13 = tmpdir('state13');
+file_put_contents($site13 . '/index.php', "<?php echo 'home';\n");
+file_put_contents($site13 . '/lib.php', "<?php function f() { return 1; }\n");
+$secretCfg = array('timezone' => 'UTC', 'site_root' => $site13, 'state_dir' => $state13, 'site_name' => 'Status shop',
+    'line_channel_access_token' => 'TOKEN-SECRET-9f2c', 'line_to' => array('Usecret0123456789'), 'mail_to' => '',
+    'ping_url' => 'https://checkin.example/ping/PING-SECRET-77', 'ping_transport' => function () { return 200; });
+$a = make($box, $clock, $secretCfg);
+$s = $a->status();
+check('before the first run: says the checks have never run here', $s['last_run'] === null && in_array('the checks have never run here', $s['problems'], true), json_encode($s['problems']));
+$a->run();
+$stateBefore = (string) file_get_contents($state13 . '/state.json');
+$s = $a->status();
+$fp = $a->fingerprint();
+check('after a run: last run, files watched, the current fingerprint, who gets the alerts', $s['last_run'] === $clock && $s['files']['watched'] === 2
+    && $s['files']['fingerprint'] === $fp['code'] && $s['delivery']['line'] === true && $s['delivery']['line_recipients'] === 1
+    && $s['outside_checkin']['configured'] === true && $s['checkin']['every_days'] === 7, json_encode($s));
+check('it points out that there is no fallback e-mail', count($s['problems']) === 1 && strpos($s['problems'][0], 'no fallback e-mail') !== false, json_encode($s['problems']));
+check('no token, recipient id or check-in address in it', strpos(json_encode($s), 'SECRET') === false && strpos(json_encode($s), 'Usecret') === false);
+check('asking for the status changes nothing and sends nothing', (string) file_get_contents($state13 . '/state.json') === $stateBefore && count($box['line']) === 0);
+
+$a->custom('something happened', array('x'), SecurityAlerts::URGENT, 'st1');
+$clock += 300; $a->run();
+$s = $a->status();
+$last = $s['recent'] ? $s['recent'][count($s['recent']) - 1] : array();
+check('the latest findings are listed with how they were delivered', $s['sent_today'] === 1 && isset($last['title']) && $last['title'] === 'something happened'
+    && $last['status'] === 'line' && $last['level'] === SecurityAlerts::URGENT, json_encode($s['recent']));
+$box['status'] = 500;
+$a->custom('cannot be delivered', array('x'), SecurityAlerts::URGENT, 'st2');
+$clock += 300; $a->run();
+$s = $a->status();
+check('an alert that is waiting to be re-sent shows up as a problem', $s['waiting']['count'] === 1 && $s['waiting']['oldest'] === $clock
+    && count(array_filter($s['problems'], function ($p) { return strpos($p, 'waiting to be re-sent') !== false; })) === 1, json_encode($s['problems']));
+$clock += 2 * 3600;
+$s = $a->status();
+check('two hours without a run: "is the scheduled job still there?"', count(array_filter($s['problems'], function ($p) { return strpos($p, 'no check for 120 minutes') !== false; })) === 1,
+    json_encode($s['problems']));
+$b = make($box, $clock, array('enabled' => false, 'line_channel_access_token' => '', 'line_to' => array(), 'mail_to' => ''));
+$s = $b->status();
+check('switched off, and nowhere to send to: both are named', in_array('the module is switched off (enabled = false)', $s['problems'], true)
+    && count(array_filter($s['problems'], function ($p) { return strpos($p, 'nowhere to send alerts') !== false; })) === 1, json_encode($s['problems']));
+
+if (function_exists('exec'))
+{
+    $app2 = tmpdir('app2');
+    mkdir($app2 . '/lib', 0700, true);
+    mkdir($app2 . '/bin', 0700, true);
+    copy(__DIR__ . '/../lib/SecurityAlerts.php', $app2 . '/lib/SecurityAlerts.php');
+    copy(__DIR__ . '/../examples/security-alerts-cron.php', $app2 . '/bin/security-alerts-cron.php');
+    file_put_contents($app2 . '/bin/security-alerts.config.php', '<?php return ' . var_export(array(
+        'state_dir' => $state13, 'site_root' => $site13, 'site_name' => 'Status shop', 'timezone' => 'UTC',
+        'line_channel_access_token' => 'TOKEN-SECRET-9f2c', 'line_to' => array('Usecret0123456789'), 'ping_url' => 'https://checkin.example/ping/PING-SECRET-77',
+    ), true) . ";\n");
+    $lines = array();
+    exec(escapeshellarg(PHP_BINARY) . ' ' . escapeshellarg($app2 . '/bin/security-alerts-cron.php') . ' --status', $lines, $code);
+    $out = implode("\n", $lines);
+    check('cron entry --status: prints the picture in plain lines, exit 1 because something needs a look, no secrets', $code === 1
+        && strpos($out, 'Status shop') !== false && strpos($out, $fp['code']) !== false && strpos($out, 'waiting to be re-sent') !== false
+        && strpos($out, 'something happened') !== false && strpos($out, 'SECRET') === false && strpos($out, 'Usecret') === false, "exit=$code\n" . $out);
+}
+else
+{
+    echo "  skip --status from the command line (exec() is disabled on this PHP)\n";
 }
 
 /* ------------------------------------------------------------------ */

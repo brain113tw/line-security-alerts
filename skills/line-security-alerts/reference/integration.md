@@ -229,6 +229,27 @@ register_shutdown_function(function () {
 
 The check-in address (`ping_url`) is not written to any of them.
 
+### Is it still working? `--status`
+
+`php security-alerts-cron.php --status` (or `$alerts->status()` from code) answers that without
+sending or changing anything: last run, where alerts go, messages sent today, alerts waiting to be
+re-sent, files watched with the last scan and the last full re-read, the current code fingerprint next
+to the one in the last check-in, the outside check-in, and the latest findings with how each was
+delivered. Lines starting with `!!` need a look (no run for a while, nowhere to send to, no fallback
+e-mail, alerts stuck, check-in address failing…); the exit code is 1 when there is at least one. The
+token, the recipient ids and the check-in address are never printed.
+
+### LINE's monthly allowance
+
+A LINE Official Account may push a limited number of messages a month (how many depends on its
+plan), counted per recipient; when the limit is reached LINE answers 429 and delivers nothing. With
+each weekly check-in the module asks LINE for the limit and the number sent so far and adds one line:
+"LINE messages this month: about 120 of 200 used". From 80% it is a warning. The number is LINE's own,
+approximate, and includes everything else the same account sent (campaign messages too). A plan
+without a limit, or a LINE that does not answer the question, simply means no line. Two small GET
+requests once a week; `'line_quota_check' => false` turns it off. A custom `transport` receives
+`'GET'` as its fourth argument for these.
+
 ### When an alert cannot be delivered
 
 LINE refuses or is unreachable and there is no e-mail fallback (or that fails too): the composed

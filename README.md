@@ -39,9 +39,13 @@ php skills/line-security-alerts/scripts/demo.php --lang=zh-TW --site="我的商�
 偵測持續運作中。過去 7 天：檢查 2016 次、回報 4 件事（其中緊急 1 件）。
 目前看著 1850 支程式檔，上次完整檢查 11/28 07:00。
 程式總指紋：3f9a-0c1d-77b2-e4a8。之後每週都會附上，往上滑就能跟前一則對照。
+這個月 LINE 大約發了 37 則，上限 200 則。
 紀錄從 2026-11-20 開始。這個日期如果比你記得的新，代表紀錄被重設過，要問清楚原因。
 這則每週一次。哪一週沒收到，代表檢查沒在跑。
 ```
+
+最後那一行「這個月 LINE 發了幾則」是每週順便問 LINE 的：官方帳號每個月能發的則數有上限，用完就發不出去。
+用到八成會變成警告，讓你來得及升級方案或確認備援 Email 有設好。
 
 收到通知之後該怎麼做，有一份寫給老闆看的中文說明：
 **[收到通知該怎麼辦](skills/line-security-alerts/reference/when-an-alert-arrives.zh-TW.md)**（建議存在手機裡）。
@@ -192,6 +196,15 @@ php security-alerts-cron.php --audit
 `--audit` 會把每一支程式檔讀過一遍，列出內容可疑、或放在上傳資料夾裡的程式，讓你（或工程師）逐一確認。
 正常的程式也可能被列出來，所以它只列清單、不發通知、不動任何檔案。
 
+之後想知道「它現在還好嗎」，跑這一行：
+
+```
+php security-alerts-cron.php --status
+```
+
+它會列出上次檢查的時間、看著幾支檔、最近回報了什麼、有沒有通知卡著沒發出去，最後用 `!!` 標出需要處理的事。
+一樣只看不動，不會發任何訊息。
+
 各個掛點放在哪裡、檔案掃描怎麼設定，請看
 [skills/line-security-alerts/reference/integration.md](skills/line-security-alerts/reference/integration.md)（英文）；
 收到通知時該怎麼做，請看[收到通知該怎麼辦](skills/line-security-alerts/reference/when-an-alert-arrives.zh-TW.md)（中文）。
@@ -225,6 +238,7 @@ php security-alerts-cron.php --audit
 | `quarantine_uploads` | 關閉 | 上傳資料夾裡新出現的程式檔自動改名（不刪除）；見上面「自動隔離」 |
 | `quiet_hours` / `daily_cap` | 6 / 10 | 同一件事多久不重複／一天最多幾則 |
 | `heartbeat_days` | 7 | 每幾天報平安一次（0＝不報） |
+| `line_quota_check` | 開啟 | 每週報平安時順便問 LINE 這個月發了幾則、上限多少 |
 | `witness_file` | | 放在紀錄資料夾「外面」的小檔；紀錄被整個清掉時靠它發現 |
 | `ping_url` | | 外部「排程報到」服務給的網址（選用）；要當成密碼保管，放環境變數 |
 | `notifier` | | 自己的通知管道（選用）；沒設就用 LINE |
@@ -240,7 +254,7 @@ php security-alerts-cron.php --audit
 php skills/line-security-alerts/scripts/selftest.php
 ```
 
-150 多項情境測試（登入、裝置、帳號、防火牆、金額、檔案、後門樣式、每週報平安與總指紋、紀錄被清空或被改、
+170 項情境測試（登入、裝置、帳號、防火牆、金額、檔案、後門樣式、每週報平安與總指紋、紀錄被清空或被改、
 舊版指紋升級、外部報到、自動隔離、時間被調回去、補發、非 UTF-8 檔名、每日上限、Email 備援…），不連網路。
 每次更新，GitHub 會自動在 Linux（PHP 7.4～8.5）和 Windows 上把這些測試再跑一遍。
 
@@ -274,6 +288,9 @@ php -S 127.0.0.1:18765 skills/line-security-alerts/scripts/fake_line_server.php
 - 傳到 LINE 的內容只有帳號名稱、IP、檔名、金額這類摘要，不含密碼或客人資料。
 - 外部報到只送出一個不帶任何內容的連線，不會把網站名稱、檔名或通知內容傳給那個服務。
 - 測試請在本機或測試站做，不要拿正式網站做攻擊測試。
+- 發現這個套件本身有安全上的問題，請不要直接公開細節，回報方式寫在 [SECURITY.md](SECURITY.md)。
+
+每一版改了什麼，記在 [CHANGELOG.md](CHANGELOG.md)。
 
 ## 授權
 

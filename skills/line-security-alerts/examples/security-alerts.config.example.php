@@ -20,6 +20,7 @@ return array(
     'line_channel_access_token' => (string) getenv('LINE_ALERT_TOKEN'),
     'line_to'                   => array_filter(explode(',', (string) getenv('LINE_ALERT_TO'))),   // "Uxxxxxxxx…" (you) or "Cxxxxxxxx…" (a group)
     // 'line_api_base'         => 'http://127.0.0.1:8765',   // the fake server in scripts/, for trying things out
+    // 'line_quota_check'      => false,                     // do not ask LINE once a week how much of the monthly allowance is used
 
     /* If LINE refuses (no token, monthly quota used up), alerts go here instead. */
     'mail_to'   => (string) getenv('ALERT_MAIL_TO'),

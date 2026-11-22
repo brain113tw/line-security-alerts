@@ -48,9 +48,14 @@ checks have stopped:
 Still on duty. Last 7 day(s): 2016 checks run, 4 thing(s) reported (1 urgent).
 Watching 1850 code files; last full scan 11/28 07:00.
 Code fingerprint: 3f9a-0c1d-77b2-e4a8. It comes with every check-in from now on; scroll up to compare with the one before.
+LINE messages this month: about 37 of 200 used.
 Records go back to 2026-11-20. If that date is newer than you remember, the records were reset: ask why.
 You get this once a week. If a week passes without it, the checks have stopped running.
 ```
+
+The line about LINE messages is asked from LINE once a week: an official account may only send so
+many messages a month, and once they are used up nothing is delivered. From 80% on it becomes a
+warning, in time to raise the plan or make sure the fallback e-mail is set.
 
 What to do when a message arrives is written up for owners, not programmers:
 **[When an alert arrives](skills/line-security-alerts/reference/when-an-alert-arrives.md)** (keep it on your phone).
@@ -216,6 +221,15 @@ you installed the module, it becomes part of normal too. `--audit` reads every c
 the ones that look suspicious or sit in an upload folder, for you or your developer to go through.
 Legitimate code can match as well, so it only prints a list: nothing is sent, no file is touched.
 
+Later, to answer "is it still all right?", run:
+
+```
+php security-alerts-cron.php --status
+```
+
+It shows when the checks last ran, how many files are watched, what was reported recently, whether
+any alert is stuck waiting, and marks with `!!` whatever needs a look. Read-only as well.
+
 Where each hook goes and how to configure the file scan:
 [skills/line-security-alerts/reference/integration.md](skills/line-security-alerts/reference/integration.md).
 
@@ -250,6 +264,7 @@ template; each service wants its own request format, so follow its documentation
 | `quarantine_uploads` | off | Rename (never delete) new program files that appear in upload folders; see "Automatic quarantine" above |
 | `quiet_hours` / `daily_cap` | 6 / 10 | Repeat window / messages per day |
 | `heartbeat_days` | 7 | Days between "still on duty" messages (0 = never) |
+| `line_quota_check` | on | With the weekly check-in, ask LINE how many messages were sent this month and what the limit is |
 | `witness_file` | | A small file OUTSIDE the state folder; reveals a wiped state folder |
 | `ping_url` | | Address from an outside "cron check-in" service (optional). Keep it like a password: environment variable |
 | `notifier` | | Your own channel (optional); LINE is used when it is not set |
@@ -265,7 +280,7 @@ The full list is `SecurityAlerts::defaults()`. Thresholds are starting points �
 php skills/line-security-alerts/scripts/selftest.php
 ```
 
-150+ scenario checks (logins, devices, accounts, firewall, money, files, web-shell patterns, weekly
+170 scenario checks (logins, devices, accounts, firewall, money, files, web-shell patterns, weekly
 check-in and fingerprint, wiped or edited records, upgrading old fingerprints, outside check-in,
 quarantine, timestamps put back, delayed delivery, non-UTF-8 names, daily cap, e-mail fallback…), no
 network. On every change GitHub runs them again on Linux (PHP 7.4–8.5)
@@ -306,6 +321,10 @@ so you can try that without signing up anywhere.
 - Messages carry summaries only (account names, IPs, file names, amounts) — no passwords, no customer data.
 - The outside check-in is one empty request: no site name, file name or alert text is sent to that service.
 - Test on a local or staging copy; never attack your production site to "see if it works".
+- Found a security problem in this package itself? Please do not publish the details; see
+  [SECURITY.md](SECURITY.md).
+
+What changed in each version is in [CHANGELOG.md](CHANGELOG.md).
 
 ## License
 

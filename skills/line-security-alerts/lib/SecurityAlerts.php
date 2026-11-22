@@ -67,6 +67,9 @@ final class SecurityAlerts
             'line_to'            => array(),       // userId(s) "U…" or groupId(s) "C…"
             'line_api_base'      => 'https://api.line.me',   // point to a fake server in tests
             'line_timeout'       => 8,
+            /* Once a week (with the check-in) ask LINE how many messages this account has sent this month and what
+               its limit is. When the limit is reached LINE stops delivering, so it is better to see it coming. */
+            'line_quota_check'   => true,
 
             /* E-mail fallback (PHP mail()) */
             'mail_to'            => '',
@@ -144,7 +147,7 @@ final class SecurityAlerts
             'notifier'           => null,
 
             /* Dependency injection (tests, custom HTTP / mail) */
-            'transport'          => null,          // function(string $url, array $headers, string $body): array(int $status, string $body)
+            'transport'          => null,          // function(string $url, array $headers, string $body, string $method = 'POST'): array(int $status, string $body)
             'ping_transport'     => null,          // function(string $url, int $timeout): int $status
             'renamer'            => null,          // function(string $from, string $to): bool  (used by quarantine_uploads)
             'mailer'             => null,          // function(string $to, string $subject, string $text, string $from): bool
@@ -429,6 +432,106 @@ final class SecurityAlerts
     {
         $this->rules();
         return $this->badRules;
+    }
+
+    /**
+     * Where things stand right now, for the person who installed it or is asked "is it still working?".
+     * Read-only: nothing is sent, nothing is changed. No token, recipient id or check-in address is included.
+     *
+     * @param  int $recent how many of the latest findings to include
+     * @return array see the keys below; 'problems' lists what needs a look (empty = fine)
+     */
+    public function status($recent = 10)
+    {
+        $now = $this->now();
+        $dir = $this->cfg['state_dir'];
+        $state = is_file($dir . '/state.json') ? json_decode((string) @file_get_contents($dir . '/state.json'), true) : array();
+        if (!is_array($state))
+        {
+            $state = array();
+        }
+        $hb = $this->tally($state, $now);
+        $box = isset($state['outbox']) && is_array($state['outbox']) ? array_values($state['outbox']) : array();
+        $scan = (bool) $this->cfg['file_scan'];
+        $fp = ($scan && !empty($state['files_baselined'])) ? $this->fingerprint() : null;
+        $days = (int) $this->cfg['heartbeat_days'];
+        $line = (string) $this->cfg['line_channel_access_token'] !== '' && (bool) $this->cfg['line_to'];
+        $out = array(
+            'now'          => $now,
+            'site_name'    => (string) $this->cfg['site_name'],
+            'enabled'      => (bool) $this->cfg['enabled'],
+            'installed_at' => !empty($state['installed_at']) ? (int) $state['installed_at'] : null,
+            'last_run'     => !empty($state['last_run']) ? (int) $state['last_run'] : null,
+            'delivery'     => array(
+                'notifier' => is_callable($this->cfg['notifier']),
+                'line' => $line,
+                'line_recipients' => $line ? count((array) $this->cfg['line_to']) : 0,
+                'mail' => (string) $this->cfg['mail_to'] !== '',
+            ),
+            'sent_today'   => (isset($state['push_day']) && $state['push_day'] === date('Y-m-d', $now)) ? (int) $state['push_count'] : 0,
+            'daily_cap'    => (int) $this->cfg['daily_cap'],
+            'waiting'      => array('count' => count($box), 'oldest' => $box && isset($box[0]['t']) ? (int) $box[0]['t'] : null),
+            'files'        => array(
+                'scan' => $scan,
+                'watched' => isset($state['files_count']) ? (int) $state['files_count'] : 0,
+                'baseline_ready' => !empty($state['files_baselined']),
+                'last_scan' => !empty($state['files_complete_at']) ? (int) $state['files_complete_at'] : null,
+                'scan_unfinished' => !empty($state['files_partial']),
+                'last_full_reread' => !empty($state['files_deep_at']) ? (int) $state['files_deep_at'] : null,
+                'fingerprint' => is_array($fp) ? $fp['code'] : null,
+                'fingerprint_at_last_checkin' => isset($state['hb_fp']) ? (string) $state['hb_fp'] : null,
+            ),
+            'checkin'      => array(
+                'every_days' => $days,
+                'counting_since' => (int) $hb['at'],
+                'next_due' => $days > 0 ? (int) $hb['at'] + $days * 86400 : null,
+                'runs' => (int) $hb['runs'], 'reported' => (int) $hb['sent'], 'urgent' => (int) $hb['urgent'],
+            ),
+            'outside_checkin' => array(
+                'configured' => trim((string) $this->cfg['ping_url']) !== '',
+                'failing' => isset($state['ping_fail']['n']) ? (int) $state['ping_fail']['n'] : 0,
+                'failing_since' => isset($state['ping_fail']['since']) ? (int) $state['ping_fail']['since'] : null,
+            ),
+            'recent'       => array(),
+            'problems'     => array(),
+        );
+        /* the latest findings: read only the end of the file */
+        $log = $dir . '/findings.ndjson';
+        if ($recent > 0 && is_file($log) && ($fh = @fopen($log, 'rb')))
+        {
+            $size = (int) filesize($log);
+            fseek($fh, max(0, $size - 131072));
+            $lines = explode("\n", trim((string) stream_get_contents($fh)));
+            fclose($fh);
+            if ($size > 131072)
+            {
+                array_shift($lines);   // the first line is probably cut in half
+            }
+            foreach (array_slice($lines, -$recent) as $l)
+            {
+                $e = json_decode($l, true);
+                if (is_array($e) && isset($e['t'], $e['title']))
+                {
+                    $out['recent'][] = array('t' => (int) $e['t'], 'level' => isset($e['level']) ? (int) $e['level'] : 0,
+                        'title' => (string) $e['title'], 'status' => isset($e['status']) ? (string) $e['status'] : '');
+                }
+            }
+        }
+        /* what deserves a look */
+        $p = array();
+        if (!$out['enabled']) { $p[] = 'the module is switched off (enabled = false)'; }
+        if (!is_dir($dir) || !is_writable($dir)) { $p[] = 'the state folder is missing or not writable'; }
+        $stale = max(900, 3 * (int) $this->cfg['tick_seconds']);
+        if ($out['last_run'] === null) { $p[] = 'the checks have never run here'; }
+        elseif ($now - $out['last_run'] > $stale) { $p[] = 'no check for ' . (int) round(($now - $out['last_run']) / 60) . ' minutes: is the scheduled job still there?'; }
+        if (!$out['delivery']['notifier'] && !$line && !$out['delivery']['mail']) { $p[] = 'nowhere to send alerts: no LINE token/recipient, no e-mail, no notifier'; }
+        elseif (!$out['delivery']['notifier'] && $line && !$out['delivery']['mail']) { $p[] = 'no fallback e-mail (mail_to): when LINE refuses, alerts wait instead of arriving'; }
+        if ($out['waiting']['count'] > 0) { $p[] = $out['waiting']['count'] . ' alert(s) could not be delivered yet and are waiting to be re-sent'; }
+        if ($out['outside_checkin']['failing'] >= 3) { $p[] = 'the outside check-in address has failed ' . $out['outside_checkin']['failing'] . ' times in a row'; }
+        if ($scan && !$out['files']['baseline_ready'] && $out['last_run'] !== null) { $p[] = 'the file baseline is not complete yet'; }
+        if ($this->cfg['site_root'] === '') { $p[] = 'file scan is off (site_root is not set)'; }
+        $out['problems'] = $p;
+        return $out;
     }
 
     /* ======================================================================
@@ -1586,6 +1689,24 @@ final class SecurityAlerts
                 $body[] = $this->t('hb_ping_ok');
             }
         }
+        $quota = $this->lineQuota();
+        if ($quota !== null)
+        {
+            if ($quota['used'] >= $quota['limit'])
+            {
+                $body[] = $this->t('hb_quota_out', $quota['limit'], $quota['used']);
+                $warn = true;
+            }
+            elseif ($quota['used'] >= 0.8 * $quota['limit'])
+            {
+                $body[] = $this->t('hb_quota_low', $quota['used'], $quota['limit']);
+                $warn = true;
+            }
+            else
+            {
+                $body[] = $this->t('hb_quota', $quota['used'], $quota['limit']);
+            }
+        }
         $body[] = $this->t('hb_since', date('Y-m-d', (int) $state['installed_at']));
         $body[] = $this->t('hb_hint');
         $lines = array_merge(array($this->t($warn ? 'hb_header_warn' : 'hb_header', $this->cfg['site_name'], date('m/d H:i', $now)), ''), $body);
@@ -1733,13 +1854,51 @@ final class SecurityAlerts
         return 'failed';
     }
 
-    private function http($url, array $headers, $body)
+    private function http($url, array $headers, $body, $method = 'POST')
     {
         if (is_callable($this->cfg['transport']))
         {
-            return call_user_func($this->cfg['transport'], $url, $headers, $body);
+            return call_user_func($this->cfg['transport'], $url, $headers, $body, $method);
         }
-        return $this->request('POST', $url, $headers, $body, (int) $this->cfg['line_timeout']);
+        return $this->request($method, $url, $headers, $body, (int) $this->cfg['line_timeout']);
+    }
+
+    /**
+     * How much of this month's LINE allowance is used. Only pushes count (one per recipient); the figure LINE
+     * returns is approximate and includes whatever else the same official account sent this month.
+     *
+     * @return array|null array('used' => int, 'limit' => int); null = the plan has no limit, LINE is not
+     *                    configured, the check is switched off, or LINE did not answer
+     */
+    private function lineQuota()
+    {
+        $token = (string) $this->cfg['line_channel_access_token'];
+        if (!$this->cfg['line_quota_check'] || $token === '' || !$this->cfg['line_to'])
+        {
+            return null;
+        }
+        $base = rtrim($this->cfg['line_api_base'], '/');
+        $headers = array('Authorization: Bearer ' . $token);
+        try
+        {
+            $r = (array) $this->http($base . '/v2/bot/message/quota', $headers, '', 'GET');
+            $limit = isset($r[0], $r[1]) && $r[0] >= 200 && $r[0] < 300 ? json_decode((string) $r[1], true) : null;
+            if (!is_array($limit) || !isset($limit['type'], $limit['value']) || $limit['type'] !== 'limited' || (int) $limit['value'] <= 0)
+            {
+                return null;
+            }
+            $r = (array) $this->http($base . '/v2/bot/message/quota/consumption', $headers, '', 'GET');
+            $used = isset($r[0], $r[1]) && $r[0] >= 200 && $r[0] < 300 ? json_decode((string) $r[1], true) : null;
+            if (!is_array($used) || !isset($used['totalUsage']))
+            {
+                return null;
+            }
+            return array('used' => max(0, (int) $used['totalUsage']), 'limit' => (int) $limit['value']);
+        }
+        catch (Throwable $e)
+        {
+            return null;
+        }
     }
 
     /** @return array array(int $status, string $body); status 0 = no answer (could not connect, timed out) */
@@ -2063,6 +2222,9 @@ final class SecurityAlerts
                 'hb_fp_diff_quiet' => 'Code fingerprint: %s (was %s). %d change(s) in between were written to the log but not sent to you; have your developer read the log.',
                 'hb_fp_diff_none' => '⚠ Code fingerprint: %s (was %s). It changed, yet no code change is on record in between: the fingerprint records may have been tampered with. Handle it as a possible backdoor.',
                 'hb_ping_ok' => 'Outside check-in: working (if the schedule stops, that service tells you).',
+                'hb_quota' => 'LINE messages this month: about %d of %d used.',
+                'hb_quota_low' => '⚠ LINE messages this month: about %d of %d used. Once the limit is reached LINE stops delivering; alerts then go by e-mail, or wait until they can be sent.',
+                'hb_quota_out' => '⚠ LINE messages this month: the limit of %d is used up (about %d sent). Alerts cannot reach LINE until next month or a bigger plan; make sure a fallback e-mail is set.',
                 'hb_ping_bad' => '⚠ The outside check-in address has failed %d time(s) in a row (since %s). Have your developer check ping_url, or nobody will tell you when the schedule stops.',
                 'hb_since' => 'Records go back to %s. If that date is newer than you remember, the records were reset: ask why.',
                 'hb_hint' => 'You get this once a week. If a week passes without it, the checks have stopped running.',
@@ -2136,6 +2298,9 @@ final class SecurityAlerts
                 'hb_fp_diff_quiet' => '程式總指紋：%s（上次是 %s）。這段時間有 %d 次變動只寫進紀錄、沒有發通知，請工程師看一下紀錄。',
                 'hb_fp_diff_none' => '⚠ 程式總指紋：%s（上次是 %s）。指紋變了，但這段時間沒有任何程式變動的紀錄，指紋紀錄可能被動過手腳。請當成「主機上可能有後門」處理。',
                 'hb_ping_ok' => '外部報到：正常（排程一停，外部服務會另外通知你）。',
+                'hb_quota' => '這個月 LINE 大約發了 %d 則，上限 %d 則。',
+                'hb_quota_low' => '⚠ 這個月 LINE 大約發了 %d 則，上限 %d 則，快用完了。用完之後 LINE 就發不出去：通知會改寄 Email，沒設 Email 就先留著，等能發再補。',
+                'hb_quota_out' => '⚠ 這個月 LINE 的 %d 則已經用完（大約發了 %d 則）。到下個月或升級方案之前，通知到不了 LINE；請確認有設定備援的 Email。',
                 'hb_ping_bad' => '⚠ 外部報到網址已經連續失敗 %d 次（從 %s 起）。請工程師檢查設定裡的 ping_url，不然排程停了不會有人通知你。',
                 'hb_since' => '紀錄從 %s 開始。這個日期如果比你記得的新，代表紀錄被重設過，要問清楚原因。',
                 'hb_hint' => '這則每週一次。哪一週沒收到，代表檢查沒在跑。',

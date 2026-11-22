@@ -178,6 +178,17 @@ Just read what follows it:
 To check for yourself, scroll up to the previous check-in and compare the two strings; that tells
 you whether the message is telling the truth.
 
+### The line "LINE messages this month: about N of M used"
+
+A LINE Official Account may only push a limited number of messages a month (depending on its plan).
+The monitor asks LINE once a week; the number covers everything that account sent, campaign messages
+to customers included.
+
+- No ⚠: nothing to do.
+- **⚠ "about N of M" or "used up"**: once the limit is reached LINE delivers nothing, security alerts
+  included. Do one or both: raise the plan in the LINE Official Account Manager; have your developer
+  make sure a fallback e-mail address is set (then alerts go by e-mail when LINE refuses).
+
 ### An extra line: "⚠ The outside check-in address has failed…"
 
 **Meaning**: you set up "an outside service tells me when the schedule stops", but the module

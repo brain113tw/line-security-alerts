@@ -26,8 +26,8 @@ Read these when you need them:
 - [reference/integration.md](reference/integration.md) — where each hook goes, with plain-PHP examples; how the monitor watches itself; the outside check-in; comparing the code fingerprint; `--audit` and custom rules; the optional quarantine of uploaded programs; using another channel than LINE
 - [reference/when-an-alert-arrives.md](reference/when-an-alert-arrives.md) / [繁體中文](reference/when-an-alert-arrives.zh-TW.md) — the owner's checklist: what each message means and what to do first
 - [reference/line-setup.md](reference/line-setup.md) — getting a channel access token and the user/group ID
-- [examples/](examples/) — a config template and the cron entry point (`--test`, `--audit`, `--fingerprint`, `--manifest`, `--rebaseline`)
-- `scripts/selftest.php` — 150+ checks, no network; `scripts/fake_line_server.php` — a local stand-in for LINE, for the check-in service and for a webhook
+- [examples/](examples/) — a config template and the cron entry point (`--status`, `--test`, `--audit`, `--fingerprint`, `--manifest`, `--rebaseline`)
+- `scripts/selftest.php` — 170 checks, no network; `scripts/fake_line_server.php` — a local stand-in for LINE, for the check-in service and for a webhook
 - `scripts/fingerprint.php` — the code fingerprint of any folder, to compare a clean local copy with the one the server reports
 - `scripts/demo.php` — replays a few days at a small shop and prints the exact messages the owner
   would get (`--lang=zh-TW`, `--site="Their shop"`). Run it and show the output when the user asks
@@ -140,6 +140,10 @@ Preferred: cron every 5 minutes running `examples/security-alerts-cron.php` (adj
    (`http://127.0.0.1:18765/ping/test`).
 7. `php security-alerts-cron.php --fingerprint` shows the code fingerprint the weekly message will
    carry and whether the files on disk still match the records.
+8. `php security-alerts-cron.php --status` must end with "nothing needs a look" (or only with lines
+   you have explained to the user, such as a missing fallback e-mail). Use the same command first
+   whenever the user later asks whether the alerts still work; it never prints the token, the
+   recipients or the check-in address.
 
 ### 6. Hand-over to the user
 
@@ -159,7 +163,10 @@ Tell the user, in their language:
   (e-mail, app…), so that message is not mistaken for spam;
 - that a message starting with "Delayed" is an older alert that could not be delivered at the time;
   the time in it is when the thing happened;
-- where the logs are (`state_dir/findings.ndjson` keeps every finding, sent or not);
+- where the logs are (`state_dir/findings.ndjson` keeps every finding, sent or not), and that
+  `--status` summarises them;
+- that the weekly message also says how much of the month's LINE allowance is used, and that a ⚠ on
+  that line means: raise the LINE plan or make sure the fallback e-mail is set;
 - that thresholds are starting points to tune after a week of real traffic.
 
 ## Rules for you (the agent)
