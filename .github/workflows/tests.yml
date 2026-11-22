@@ -1,0 +1,43 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  selftest:
+    name: PHP ${{ matrix.php }} on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
+        php: ['7.4', '8.0', '8.1', '8.2', '8.3', '8.4', '8.5']
+        include:
+          - os: windows-latest
+            php: '8.4'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php }}
+          extensions: curl, mbstring
+          coverage: none
+
+      - name: Syntax check
+        shell: bash
+        run: |
+          for f in $(find skills -name '*.php'); do php -l "$f"; done
+
+      - name: Self-test (no network, no LINE account)
+        run: php -d error_reporting=-1 -d display_errors=1 skills/line-security-alerts/scripts/selftest.php
+
+      - name: Demo runs
+        run: php skills/line-security-alerts/scripts/demo.php
+
+      - name: Fingerprint tool runs
+        run: php skills/line-security-alerts/scripts/fingerprint.php skills

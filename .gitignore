@@ -1,0 +1,4 @@
+security-alerts.config.php
+*.ndjson
+state.json
+files.json

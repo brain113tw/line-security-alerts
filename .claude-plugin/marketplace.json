@@ -1,0 +1,12 @@
+{
+  "name": "line-security-tools",
+  "description": "LINE security alerts for small PHP websites.",
+  "owner": { "name": "沂恩精緻洗衣 EN Laundry" },
+  "plugins": [
+    {
+      "name": "line-security-alerts",
+      "source": "./",
+      "description": "Security alerts for PHP websites, pushed to LINE. Silent when nothing is wrong."
+    }
+  ]
+}

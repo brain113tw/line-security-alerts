@@ -1,0 +1,93 @@
+<?php
+/**
+ * Example configuration. Copy it next to your app (NOT into a public web folder), rename it to
+ * security-alerts.config.php, and keep it out of version control — it holds your LINE token.
+ *
+ * Every key is optional except state_dir; see SecurityAlerts::defaults() for the full list.
+ */
+
+return array(
+    'site_name' => 'My Shop',
+    'language'  => 'en',                     // 'en' or 'zh-TW'
+    'timezone'  => 'Asia/Taipei',
+
+    /* Where the module keeps its logs and fingerprints. Must be writable by PHP AND by the cron user.
+       Best: outside the web root. If it has to be inside, the module writes a deny-all .htaccess
+       (Apache); on nginx add:  location ^~ /path/to/state { deny all; }  */
+    'state_dir' => __DIR__ . '/../var/security-alerts',
+
+    /* LINE Messaging API. Prefer environment variables (or a file outside the web root) over literals. */
+    'line_channel_access_token' => (string) getenv('LINE_ALERT_TOKEN'),
+    'line_to'                   => array_filter(explode(',', (string) getenv('LINE_ALERT_TO'))),   // "Uxxxxxxxx…" (you) or "Cxxxxxxxx…" (a group)
+    // 'line_api_base'         => 'http://127.0.0.1:8765',   // the fake server in scripts/, for trying things out
+
+    /* If LINE refuses (no token, monthly quota used up), alerts go here instead. */
+    'mail_to'   => (string) getenv('ALERT_MAIL_TO'),
+    'mail_from' => '',
+
+    /* File-integrity scan. Paths below are relative to site_root. */
+    'site_root'    => realpath(__DIR__ . '/..'),
+    'exclude_dirs' => array('.git', 'node_modules', 'var', 'storage/cache'),    // caches, compiled templates, logs…
+    'upload_dirs'  => array('public/uploads'),                                  // code files never belong here
+    'runtime_dirs' => array(),                                                  // code your app writes on its own (generated config…)
+
+    // 'scan_hours'   => 1,                                                     // how often files are checked; 0 = on every run
+    // 'rehash_days'  => 7,                                                     // how often EVERY file is re-read in full; 0 = never
+    // 'input_charset' => 'BIG5',                                               // only for old sites with file/account names that are not UTF-8
+
+    /* Optional, OFF by default: rename (never delete) a NEW program file that appears inside upload_dirs, so
+       the server stops running it. Only that: nothing outside upload_dirs, nothing that was already there,
+       no .htaccess. Run without it for a while first and make sure upload_dirs is right. */
+    // 'quarantine_uploads' => true,
+
+    /* The monitor watching itself.
+       - Once a week it says "still on duty" (0 = never) and prints one fingerprint of all code files, so
+         your chat history holds a copy that nobody on the server can rewrite.
+         A week without that message = the checks stopped.
+       - witness_file: a path OUTSIDE state_dir and outside the web root. If someone empties state_dir to
+         reset the detection, this file is still there and you get an URGENT alert.
+       - ping_url (optional): a check-in address from a "tell me when my cron job stops" service, e.g.
+         healthchecks.io. It is called after every completed run; set that service to expect a call every
+         5 minutes with about 10 minutes of grace, and it will tell you within minutes when the schedule
+         dies. Keep the address secret (anyone who has it can check in for you): environment variable, not
+         version control. The module never logs it. */
+    'heartbeat_days' => 7,
+    'witness_file'   => (string) getenv('HOME') !== '' ? getenv('HOME') . '/.security-alerts-witness' : '',
+    'ping_url'       => (string) getenv('ALERT_PING_URL'),
+
+    /* Thresholds — start with the defaults, then tune after a week of real traffic. Money amounts are in
+       your own currency; 0 disables that rule. */
+    'refund_single'        => 0,
+    'adjust_single'        => 0,
+    'cancel_paid_hour_sum' => 0,
+
+    /* Optional: lets the module notice admin-account changes made outside your admin UI (e.g. straight in
+       the database). Return username => fields; secrets are hashed before they are stored. */
+    // 'admin_snapshot' => function () {
+    //     $pdo = new PDO(getenv('DB_DSN'), getenv('DB_USER'), getenv('DB_PASS'));
+    //     $out = array();
+    //     foreach ($pdo->query('SELECT username, role, email, password_hash, totp_enabled FROM admin_users') as $r) {
+    //         $out[$r['username']] = array('role' => $r['role'], 'email' => $r['email'], 'password' => $r['password_hash'], '2fa' => (bool) $r['totp_enabled']);
+    //     }
+    //     return $out;
+    // },
+
+    /* Optional: your own "looks like a backdoor" patterns, e.g. a string found during a past incident.
+       A new or changed code file that matches is URGENT. `--audit` checks every existing file against them. */
+    // 'extra_rules'   => array(
+    //     'incident-2025' => array('pattern' => '/bad-domain\.example/i', 'label' => 'mentions the domain from our last incident'),
+    // ),
+    // 'disable_rules' => array('blob'),      // switch off a built-in rule that keeps matching your own code
+
+    /* Optional: another channel instead of (or before) LINE — Telegram, Slack, Discord, ntfy, SMS…
+       Return true when the message was accepted; return false and LINE / e-mail are used as usual.
+       $level: 0 = weekly check-in, 1 = notice, 2 = urgent. Check your service's documentation for the
+       exact request it wants; this is only the shape. */
+    // 'notifier' => function ($text, $level) {
+    //     $ch = curl_init((string) getenv('ALERT_WEBHOOK_URL'));
+    //     curl_setopt_array($ch, array(CURLOPT_POST => true, CURLOPT_RETURNTRANSFER => true, CURLOPT_TIMEOUT => 8,
+    //         CURLOPT_HTTPHEADER => array('Content-Type: application/json'), CURLOPT_POSTFIELDS => json_encode(array('text' => $text))));
+    //     curl_exec($ch);
+    //     return curl_getinfo($ch, CURLINFO_HTTP_CODE) < 300 && curl_getinfo($ch, CURLINFO_HTTP_CODE) >= 200;
+    // },
+);

@@ -1,0 +1,10 @@
+{
+  "name": "line-security-alerts",
+  "description": "Security alerts for PHP websites, pushed to LINE: suspicious admin logins, admin account changes, new or modified code files and web shells, firewall bursts, unusual refunds. Silent when nothing is wrong.",
+  "version": "1.0.0",
+  "author": { "name": "沂恩精緻洗衣 EN Laundry" },
+  "homepage": "https://github.com/brain113tw/line-security-alerts",
+  "repository": "https://github.com/brain113tw/line-security-alerts",
+  "license": "MIT",
+  "keywords": ["security", "line", "php", "intrusion-detection", "file-integrity", "alerts"]
+}
