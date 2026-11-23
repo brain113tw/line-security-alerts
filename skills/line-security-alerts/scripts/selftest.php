@@ -1214,6 +1214,265 @@ else
 }
 
 /* ------------------------------------------------------------------ */
+echo "Telegram and Discord\n";
+$clock = strtotime('2026-03-02 10:00:00 UTC');
+$calls = array();
+$answer = array();   // service => list of array(status, body) to answer in turn; nothing listed = accepted
+$slept = array();
+$net = function ($url, $headers, $body, $method = 'POST') use (&$calls, &$answer, &$box) {
+    $svc = strpos($url, '/sendMessage') !== false ? 'telegram' : (strpos($url, '/api/webhooks/') !== false ? 'discord' : 'line');
+    if ($svc === 'line' && $method === 'GET') { return fake_quota($url, $box); }
+    $calls[] = array('svc' => $svc, 'url' => $url, 'body' => json_decode($body, true));
+    if (!empty($answer[$svc])) { $next = array_shift($answer[$svc]); if ($next === 'throw') { throw new RuntimeException('boom at ' . $url); } return $next; }
+    return $svc === 'telegram' ? array(200, '{"ok":true,"result":{"message_id":1}}') : ($svc === 'discord' ? array(204, '') : array(200, '{}'));
+};
+$via = function ($svc) use (&$calls) { return array_values(array_filter($calls, function ($c) use ($svc) { return $c['svc'] === $svc; })); };
+$order = function () use (&$calls) { return implode(',', array_map(function ($c) { return $c['svc']; }, $calls)); };
+$units = function ($s) { return preg_match_all('/./us', $s) + preg_match_all('/[\x{10000}-\x{10FFFF}]/u', $s); };
+$tg = array('telegram_bot_token' => '123456:TG-SECRET-abc', 'telegram_chat_id' => '-100777', 'telegram_api_base' => 'https://tg.example');
+$dc = array('discord_webhook_url' => 'https://discord.example/api/webhooks/1/DC-SECRET-xyz');
+$noLine = array('line_channel_access_token' => '', 'mail_to' => '');
+$base = array('timezone' => 'UTC', 'transport' => $net, 'sleeper' => function ($s) use (&$slept) { $slept[] = $s; });
+
+$a = make($box, $clock, array_merge($base, $tg, $noLine));
+$a->custom('Telegram path', array('file __init__.php and *stars* <b>'), SecurityAlerts::NOTICE, 'tg1');
+$r = $a->run();
+$t = $via('telegram');
+$b = $t ? $t[0]['body'] : array();
+check('Telegram only: the alert goes to Telegram', $r['sent'] === 'telegram' && count($t) === 1, json_encode($calls));
+check('Telegram: sendMessage to the chat, plain text (no parse_mode), no link preview',
+    $t && $t[0]['url'] === 'https://tg.example/bot123456:TG-SECRET-abc/sendMessage'
+    && $b['chat_id'] === '-100777' && strpos($b['text'], 'file __init__.php and *stars* <b>') !== false && !isset($b['parse_mode'])
+    && $b['link_preview_options'] === array('is_disabled' => true), json_encode($b));
+
+$calls = array();
+$a = make($box, $clock, array_merge($base, $dc, $noLine));
+$a->custom('Discord path', array('account "@everyone" tried [reset](https://evil.example) ``` and __x__'), SecurityAlerts::NOTICE, 'dc1');
+$r = $a->run();
+$d = $via('discord');
+$c = $d ? $d[0]['body'] : array();
+check('Discord only: the alert goes to the webhook; 204 (no body) counts as delivered', $r['sent'] === 'discord' && count($d) === 1 && $d[0]['url'] === $dc['discord_webhook_url'], json_encode($calls));
+check('Discord: mentions switched off, no link previews, the text in one code block that a name cannot close early',
+    isset($c['allowed_mentions']) && $c['allowed_mentions'] === array('parse' => array()) && $c['flags'] === 4
+    && strpos($c['content'], "```\n") === 0 && substr($c['content'], -4) === "\n```" && substr_count($c['content'], '```') === 2
+    && strpos($c['content'], '@everyone') !== false && strpos($c['content'], '[reset](https://evil.example)') !== false, json_encode($c));
+
+$calls = array();
+$a = make($box, $clock, array_merge($base, $tg, $dc));   // plus LINE and e-mail from make()
+$a->custom('order', array('one'), SecurityAlerts::URGENT, 'or1');
+$r = $a->run();
+check('everything set up: Telegram goes first and nobody else is bothered', $r['sent'] === 'telegram' && $order() === 'telegram' && count($box['mail']) === 0, $order());
+$answer['telegram'] = array(array(500, '{"ok":false,"error_code":500,"description":"Internal Server Error"}'));
+$a->custom('order', array('two'), SecurityAlerts::NOTICE, 'or2');
+$clock += 300; $calls = array(); $r = $a->run();
+check('Telegram answers 500: Discord takes it', $r['sent'] === 'discord' && $order() === 'telegram,discord', $order());
+$answer = array('telegram' => array(array(401, '{"ok":false,"error_code":401,"description":"Unauthorized"}')), 'discord' => array(array(404, '{"message":"Unknown Webhook","code":10015}')));
+$a->custom('order', array('three'), SecurityAlerts::NOTICE, 'or3');
+$clock += 300; $calls = array(); $r = $a->run();
+check('Telegram and Discord refuse: LINE takes it', $r['sent'] === 'line' && $order() === 'telegram,discord,line', $order());
+$answer = array('telegram' => array(array(0, '')), 'discord' => array('throw'), 'line' => array(array(429, '{"message":"You have reached your monthly limit."}')));
+$a->custom('order', array('four'), SecurityAlerts::NOTICE, 'or4');
+$clock += 300; $calls = array(); $r = $a->run();
+check('no answer, an exception, LINE out of messages: e-mail takes it', $r['sent'] === 'mail' && $order() === 'telegram,discord,line' && count($box['mail']) === 1, $order());
+$answer = array('telegram' => array(array(200, '{"ok":false,"error_code":400,"description":"Bad Request"}')));
+$a->custom('order', array('five'), SecurityAlerts::NOTICE, 'or5');
+$clock += 300; $calls = array(); $r = $a->run();
+check('Telegram saying {"ok":false} is not taken as delivered', $r['sent'] === 'discord', $order());
+
+$got = 0;
+$calls = array();
+$a = make($box, $clock, array_merge($base, $tg, array('notifier' => function ($text, $level) use (&$got) { $got++; return false; })));
+$a->custom('notifier first', array('x'), SecurityAlerts::NOTICE, 'nf');
+$r = $a->run();
+check('your own notifier still comes first; when it says no, Telegram is next', $got === 1 && $r['sent'] === 'telegram' && $order() === 'telegram');
+
+$calls = array(); $slept = array();
+$answer = array('telegram' => array(array(429, '{"ok":false,"error_code":429,"description":"Too Many Requests: retry after 2","parameters":{"retry_after":2}}')));
+$a = make($box, $clock, array_merge($base, $tg));
+$a->custom('rate', array('x'), SecurityAlerts::NOTICE, 'rl1');
+$r = $a->run();
+check('Telegram 429 with a short wait: waits as asked, tries once more, delivered', $r['sent'] === 'telegram' && $slept === array(2.0) && $order() === 'telegram,telegram', json_encode($slept) . ' ' . $order());
+$calls = array(); $slept = array();
+$answer = array('discord' => array(array(429, '{"message":"You are being rate limited.","retry_after":0.25,"global":false}')));
+$a = make($box, $clock, array_merge($base, $dc));
+$a->custom('rate', array('x'), SecurityAlerts::NOTICE, 'rl2');
+$r = $a->run();
+check('Discord 429 (retry_after in fractions of a second): same', $r['sent'] === 'discord' && $slept === array(0.25) && $order() === 'discord,discord', json_encode($slept) . ' ' . $order());
+$calls = array(); $slept = array();
+$answer = array('telegram' => array(array(429, '{"ok":false,"error_code":429,"parameters":{"retry_after":30}}')));
+$a = make($box, $clock, array_merge($base, $tg));
+$a->custom('rate', array('x'), SecurityAlerts::NOTICE, 'rl3');
+$r = $a->run();
+check('a long wait (30 s) is not sat out: the next channel takes it at once', $r['sent'] === 'line' && $slept === array() && $order() === 'telegram,line', json_encode($slept) . ' ' . $order());
+$calls = array(); $slept = array();
+$answer = array('telegram' => array(array(429, '{"ok":false,"parameters":{"retry_after":1}}'), array(429, '{"ok":false,"parameters":{"retry_after":1}}')));
+$a = make($box, $clock, array_merge($base, $tg));
+$a->custom('rate', array('x'), SecurityAlerts::NOTICE, 'rl4');
+$r = $a->run();
+check('still 429 after the one retry: the next channel takes it (no endless waiting)', $r['sent'] === 'line' && count($slept) === 1 && $order() === 'telegram,telegram,line', $order());
+
+$full = '';
+$calls = array();
+$a = make($box, $clock, array_merge($base, $tg, $noLine, array('language' => 'zh-TW', 'notifier' => function ($text) use (&$full) { $full = $text; return false; })));
+for ($i = 0; $i < 12; $i++) { $a->custom('長訊息 ' . $i, array_fill(0, 8, '🔒' . str_repeat('後台帳號變動', 10) . ' ' . $i), SecurityAlerts::URGENT, 'long' . $i); }
+$r = $a->run();
+$t = $via('telegram');
+$joined = implode("\n", array_map(function ($c) { return preg_replace('/^\(\d\/\d\) /', '', $c['body']['text']); }, $t));
+$sizes = array_map(function ($c) use ($units) { return $units($c['body']['text']); }, $t);
+check('Telegram: a message over 4096 characters (emoji count twice) goes in numbered parts, each within the limit, nothing lost',
+    $r['sent'] === 'telegram' && count($t) === 2 && max($sizes) <= 4096 && $units($full) > 4096 && $joined === $full
+    && strpos($t[0]['body']['text'], '(1/2) ') === 0 && strpos($t[1]['body']['text'], '(2/2) ') === 0 && preg_match('//u', $t[1]['body']['text']) === 1,
+    'parts=' . count($t) . ' sizes=' . json_encode($sizes) . ' full=' . $units($full));
+$calls = array();
+$a = make($box, $clock, array_merge($base, $dc, $noLine, array('language' => 'zh-TW', 'notifier' => function ($text) use (&$full) { $full = $text; return false; })));
+for ($i = 0; $i < 12; $i++) { $a->custom('長訊息 ' . $i, array_fill(0, 8, '🔒' . str_repeat('後台帳號變動', 10) . ' ' . $i), SecurityAlerts::URGENT, 'long' . $i); }
+$r = $a->run();
+$d = $via('discord');
+$inner = array_map(function ($c) { return substr($c['body']['content'], 4, -4); }, $d);
+$joined = implode("\n", array_map(function ($s) { return preg_replace('/^\(\d\/\d\) /', '', $s); }, $inner));
+$sizes = array_map(function ($c) use ($units) { return $units($c['body']['content']); }, $d);
+$closed = count(array_filter($d, function ($c) { return strpos($c['body']['content'], "```\n(") === 0 && substr($c['body']['content'], -4) === "\n```"; }));
+check('Discord: over 2000 characters goes in parts, each its own closed code block within the limit, nothing lost',
+    $r['sent'] === 'discord' && count($d) === 3 && max($sizes) <= 2000 && $closed === 3 && $joined === $full,
+    'parts=' . count($d) . ' sizes=' . json_encode($sizes));
+$calls = array();
+$a = make($box, $clock, array_merge($base, $dc, $noLine));
+$a->custom('one enormous line', array(str_repeat('x', 4500)), SecurityAlerts::NOTICE, 'huge');
+$r = $a->run();
+$sizes = array_map(function ($c) use ($units) { return $units($c['body']['content']); }, $via('discord'));
+check('a single line longer than a whole message is cut into pieces too', $r['sent'] === 'discord' && count($sizes) === 3 && max($sizes) <= 2000, json_encode($sizes));
+
+/* line_min_level: keep LINE for what matters */
+$calls = array();
+$clock = strtotime('2026-03-02 10:00:00 UTC');
+$a = make($box, $clock, array_merge($base, $tg, array('line_min_level' => 2)));
+$box['quota'] = array(37, 200);
+$a->custom('just a notice', array('x'), SecurityAlerts::NOTICE, 'm1');
+$r = $a->run();
+check('line_min_level 2: a notice goes to Telegram, LINE is not touched', $r['sent'] === 'telegram' && $order() === 'telegram', $order());
+$a->custom('urgent one', array('x'), SecurityAlerts::URGENT, 'm2');
+$clock += 300; $calls = array(); $r = $a->run();
+check('line_min_level 2: an URGENT alert goes to LINE first', $r['sent'] === 'line' && $order() === 'line', $order());
+$answer = array('line' => array(array(429, '{"message":"You have reached your monthly limit."}')));
+$a->custom('urgent two', array('x'), SecurityAlerts::URGENT, 'm3');
+$clock += 300; $calls = array(); $r = $a->run();
+check('line_min_level 2: LINE refuses an urgent one, Telegram still takes it', $r['sent'] === 'telegram' && $order() === 'line,telegram', $order());
+$clock = strtotime('2026-03-09 10:00:00 UTC'); $calls = array(); $r = $a->run();
+$t = $via('telegram');
+check('line_min_level 2: the weekly check-in goes to Telegram and still shows LINE\'s allowance (LINE is kept for urgent ones)',
+    $r['heartbeat'] === 'telegram' && $order() === 'telegram' && strpos($t[0]['body']['text'], 'LINE messages this month: about 37 of 200 used.') !== false,
+    $r['heartbeat'] . ' ' . $order());
+$s = $a->status();
+check('status(): the route for each kind of message', $s['delivery']['route'] === array('urgent' => array('line', 'telegram', 'mail'),
+    'notice' => array('telegram', 'mail'), 'checkin' => array('telegram', 'mail')) && $s['delivery']['telegram'] && $s['delivery']['telegram_chats'] === 1
+    && $s['delivery']['line_min_level'] === 2 && !array_filter($s['problems'], function ($p) { return strpos($p, 'line_min_level') !== false || strpos($p, 'refuses') !== false; }),
+    json_encode($s['delivery']) . json_encode($s['problems']));
+
+$calls = array();
+$clock = strtotime('2026-03-02 10:00:00 UTC');
+$a = make($box, $clock, array_merge($base, array('line_min_level' => 1)));   // LINE and e-mail only
+$a->custom('a notice', array('x'), SecurityAlerts::NOTICE, 'n1');
+$r = $a->run();
+check('line_min_level 1: alerts still go to LINE', $r['sent'] === 'line');
+$clock = strtotime('2026-03-09 10:00:00 UTC'); $calls = array(); $r = $a->run();
+check('line_min_level 1: the "all is well" check-in goes by e-mail instead', $r['heartbeat'] === 'mail' && $order() === '' && count($box['mail']) === 1, $r['heartbeat'] . ' ' . $order());
+
+$calls = array();
+$clock = strtotime('2026-03-02 10:00:00 UTC');
+$a = make($box, $clock, array_merge($base, array('line_min_level' => 2, 'mail_to' => '')));   // LINE only
+$a->custom('a notice', array('x'), SecurityAlerts::NOTICE, 'o1');
+$r = $a->run();
+$s = $a->status();
+check('line_min_level 2 with nothing else set up: still LINE (better than nowhere), and status() says so', $r['sent'] === 'line'
+    && count(array_filter($s['problems'], function ($p) { return strpos($p, 'line_min_level is 2, but no other channel is set up') !== false; })) === 1, json_encode($s['problems']));
+$a = make($box, $clock, array_merge($base, $tg, $noLine, array('line_min_level' => 2)));
+$s = $a->status();
+check('line_min_level without LINE: status() says the setting does nothing', count(array_filter($s['problems'], function ($p) { return strpos($p, 'LINE is not set up: urgent alerts go to Telegram') !== false; })) === 1
+    && count(array_filter($s['problems'], function ($p) { return strpos($p, 'when Telegram refuses') !== false; })) === 1, json_encode($s['problems']));
+
+/* LINE's allowance only when LINE is really in use */
+$calls = array();
+unset($box['gets']);
+$clock = strtotime('2026-03-02 10:00:00 UTC');
+$a = make($box, $clock, array_merge($base, $tg));   // Telegram first, LINE as a backup
+$box['quota'] = array(150, 200);
+$a->run();
+$clock = strtotime('2026-03-09 10:00:00 UTC'); $calls = array(); $r = $a->run();
+$t = $via('telegram');
+check('LINE only as a backup that sent nothing: no LINE line in the check-in, LINE is not even asked',
+    $r['heartbeat'] === 'telegram' && strpos($t[0]['body']['text'], 'LINE messages') === false && !isset($box['gets']), json_encode($t));
+$answer = array('telegram' => array(array(500, '')));
+$a->custom('carried by LINE', array('x'), SecurityAlerts::NOTICE, 'bk1');
+$clock += 300; $r = $a->run();
+$clock = strtotime('2026-03-16 10:00:00 UTC'); $calls = array(); $r = $a->run();
+$t = $via('telegram');
+check('…but once the backup had to carry an alert, the next check-in shows LINE\'s allowance',
+    $r['heartbeat'] === 'telegram' && strpos($t[0]['body']['text'], 'LINE messages this month: about 150 of 200 used.') !== false, json_encode($t));
+
+$calls = array();
+$a = make($box, $clock, array_merge($base, $tg, array('daily_cap' => 1)));
+$a->custom('first', array('x'), SecurityAlerts::NOTICE, 'cap1');
+$clock += 60; $a->run();
+$a->custom('second', array('x'), SecurityAlerts::NOTICE, 'cap2');
+$clock += 60; $r = $a->run();
+check('messages on Telegram count towards daily_cap like LINE ones', $r['sent'] === 'capped' && count($via('telegram')) === 1, $order());
+
+$calls = array();
+$answer = array('discord' => array(array(404, '{"message":"Unknown Webhook","code":10015}')),
+    'telegram' => array(array(400, '{"ok":false,"error_code":400,"description":"Bad Request: chat not found for 123456:TG-SECRET-abc"}')));
+$a = make($box, $clock, array_merge($base, $tg, $dc));
+$each = $a->testEachChannel();
+check('testEachChannel(): every channel tried on its own, with the reason when it fails, and no key in the reason',
+    array_keys($each) === array('telegram', 'discord', 'line', 'mail') && !$each['telegram']['ok'] && strpos($each['telegram']['why'], 'HTTP 400: Bad Request: chat not found') === 0
+    && strpos($each['telegram']['why'], 'TG-SECRET') === false && $each['discord'] === array('ok' => false, 'why' => 'HTTP 404: Unknown Webhook')
+    && $each['line']['ok'] && $each['mail']['ok'] && $order() === 'telegram,discord,line', json_encode($each));
+$calls = array();
+$a = make($box, $clock, array_merge($base, $tg, $noLine, array('telegram_bot_token' => 'not a token/../x')));
+$each = $a->testEachChannel();
+check('a Telegram token that is not in the BotFather form is not sent anywhere', !$each['telegram']['ok'] && strpos($each['telegram']['why'], 'BotFather') !== false && $order() === '', json_encode($each));
+$calls = array();
+$a = make($box, $clock, array_merge($base, $tg, $noLine, array('telegram_chat_id' => array('-1', '-2'))));
+$answer = array('telegram' => array(array(400, '{"ok":false,"description":"Bad Request: chat not found"}')));
+$a->custom('two chats', array('x'), SecurityAlerts::NOTICE, 'two');
+$r = $a->run();
+check('two Telegram chats, one wrong: still delivered to the other', $r['sent'] === 'telegram' && count($via('telegram')) === 2);
+
+$secretsDir = tmpdir('state-secrets');
+$a = make($box, $clock, array_merge($base, $tg, $dc, array('state_dir' => $secretsDir)));
+$answer = array('telegram' => array(array(500, '')), 'discord' => array(array(500, '')), 'line' => array(array(500, '')));
+$a->custom('cannot go out', array('x'), SecurityAlerts::URGENT, 'sec1');
+$a->run();
+$a->custom('goes out', array('x'), SecurityAlerts::URGENT, 'sec2');
+$clock += 300; $a->run();
+$all = '';
+foreach (glob($secretsDir . '/*') as $f) { $all .= (string) file_get_contents($f); }
+$s = json_encode($a->status());
+check('no Telegram token or Discord address in the records or in status()', $all !== '' && strpos($all . $s, 'TG-SECRET') === false && strpos($all . $s, 'DC-SECRET') === false
+    && strpos($s, '-100777') === false);
+$answer = array();
+
+if (function_exists('exec'))
+{
+    $app3 = tmpdir('app3');
+    mkdir($app3 . '/lib', 0700, true);
+    mkdir($app3 . '/bin', 0700, true);
+    copy(__DIR__ . '/../lib/SecurityAlerts.php', $app3 . '/lib/SecurityAlerts.php');
+    copy(__DIR__ . '/../examples/security-alerts-cron.php', $app3 . '/bin/security-alerts-cron.php');
+    file_put_contents($app3 . '/bin/security-alerts.config.php', '<?php return ' . var_export(array(
+        'state_dir' => tmpdir('state-cron3'), 'site_name' => 'Route shop', 'timezone' => 'UTC', 'line_min_level' => 2,
+        'line_channel_access_token' => 'TOKEN-SECRET-9f2c', 'line_to' => array('Usecret0123456789'),
+        'telegram_bot_token' => '123456:TG-SECRET-abc', 'telegram_chat_id' => '-100777', 'discord_webhook_url' => 'https://discord.example/api/webhooks/1/DC-SECRET-xyz',
+    ), true) . ";\n");
+    $lines = array();
+    exec(escapeshellarg(PHP_BINARY) . ' ' . escapeshellarg($app3 . '/bin/security-alerts-cron.php') . ' --status', $lines, $code);
+    $out = implode("\n", $lines);
+    check('cron entry --status: the route in plain words (urgent ones on LINE first), no keys or ids',
+        strpos($out, 'alerts go to      : Telegram (1 chat), then Discord (1 webhook)  (no e-mail fallback)') !== false
+        && strpos($out, 'urgent ones       : LINE (1 recipient), then Telegram (1 chat), then Discord (1 webhook)  (line_min_level 2)') !== false
+        && strpos($out, 'SECRET') === false && strpos($out, 'Usecret') === false && strpos($out, '-100777') === false, $out);
+}
+
+/* ------------------------------------------------------------------ */
 echo "Daily cap, urgent bypass, fallback\n";
 $clock = $T0;
 $a = make($box, $clock, array('daily_cap' => 1));

@@ -39,8 +39,9 @@ like a password: anyone with it can send messages as your account.
 php security-alerts-cron.php --test
 ```
 
-Prints `line` when LINE accepted the message. `failed` means LINE refused and no e-mail fallback is
-configured; the cron log line shows nothing more, so check:
+Prints `sent via line` when LINE accepted the message (or the name of another channel that is tried
+before LINE, see below). `FAILED` means every channel refused. `--test-all` sends to each channel
+on its own and prints the reason next to the one that failed, e.g. `FAILED: HTTP 401: Unauthorized`:
 
 | What you see | Usual cause |
 |---|---|
@@ -49,12 +50,16 @@ configured; the cron log line shows nothing more, so check:
 | HTTP 429 | Monthly message quota used up (free plans have a small quota) or rate limit |
 | `line` but nothing on the phone | You have not added the account as a friend, or blocked it |
 
-To see the status code yourself, pass a `transport` callable that logs the response, or point
-`line_api_base` at `scripts/fake_line_server.php` to check the request.
+To see the request itself, point `line_api_base` at `scripts/fake_line_server.php`.
+
+Telegram and Discord are set up in the README ("Telegram or Discord instead"). When several channels
+are set up they are tried in the order Telegram → Discord → LINE → e-mail, so a test reports the
+first one that took it; with `line_min_level => 2` LINE carries only URGENT alerts.
 
 ## Quota
 
 Every alert is one push message per recipient. With the defaults (one combined message per run,
 the same finding not repeated for 6 hours, at most `daily_cap` non-urgent messages a day) a normal
-month uses very few. When the quota runs out LINE answers 429 and the module falls back to e-mail
-if `mail_to` is set — set it.
+month uses very few. When the quota runs out LINE answers 429 and the module goes on to the next
+channel (Telegram, Discord, e-mail — whichever are set up); set at least `mail_to`. To spend the
+allowance only on what matters, use `line_min_level => 2` together with Telegram or Discord.

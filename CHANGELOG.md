@@ -1,5 +1,27 @@
 # Changelog / 更新紀錄
 
+## 1.2.0 — 2026-11-23
+
+- **Telegram and Discord built in.** `telegram_bot_token` + `telegram_chat_id`, `discord_webhook_url`.
+  A message goes to the first channel that takes it: your notifier → Telegram → Discord → LINE →
+  e-mail. Plain text on Telegram; on Discord inside a code block, with mentions switched off, so a
+  name containing `@everyone` or a fake link stays harmless. Long messages go in numbered parts; a
+  short "too many requests" wait is honoured once, a long one hands over to the next channel.
+  Thanks to a suggestion on Threads.
+  內建 Telegram 和 Discord，可以取代 LINE，也可以互相備援。感謝 Threads 上的建議。
+- **`line_min_level`** keeps LINE's monthly allowance for what matters: 2 = only URGENT alerts use
+  LINE (and are tried there first), notices and the weekly check-in go elsewhere; 1 = only the weekly
+  check-in stays off LINE. With nothing else set up LINE is still used, and `--status` says so.
+  新增「只有緊急的才用 LINE」的設定，省 LINE 的則數。
+- The "LINE messages this month" line of the weekly check-in appears only when LINE is really in use.
+- **`--test-all`** (and `testEachChannel()`): a test message to every channel on its own, with the
+  service's reason when one fails. `--status` shows the order the channels are tried in.
+- The fake server plays Telegram and Discord too (429, 500, slow, gone, too long).
+- Self-test: 204 checks.
+
+Upgrading from 1.1.x: replace `lib/SecurityAlerts.php` (and the cron entry for `--test-all` and the
+new `--status` lines). Nothing changes until you add a Telegram or Discord key.
+
 ## 1.1.1 — 2026-11-23
 
 - New: a prevention checklist ([English](skills/line-security-alerts/reference/hardening-checklist.md),

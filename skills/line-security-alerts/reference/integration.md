@@ -410,18 +410,65 @@ not help against a file planted outside the upload folders, and a server that ha
 EVERY file in that folder as a program (a planted `.htaccess` — which is reported as URGENT) would
 still run the renamed file. Treat the alert exactly as you would without it.
 
-## 13. Another channel instead of LINE
+## 13. Telegram, Discord, or a channel of your own
+
+The detection does not depend on LINE; only the last step does.
+
+```php
+'telegram_bot_token'  => getenv('TELEGRAM_ALERT_TOKEN'),   // "123456789:AAH…" from BotFather
+'telegram_chat_id'    => getenv('TELEGRAM_ALERT_CHAT'),    // a number, negative for a group; or an array
+'discord_webhook_url' => getenv('DISCORD_ALERT_WEBHOOK'),  // https://discord.com/api/webhooks/…; or an array
+'line_min_level'      => 2,                                // optional: LINE for URGENT only
+```
+
+A message goes to **one** channel: the first in this order that takes it — your `notifier`, Telegram,
+Discord, LINE, e-mail (only the ones that are set up). When all of them fail, the message waits in the
+outbox and is re-sent later.
+
+`line_min_level` keeps LINE for what matters: 0 = every message may use LINE (default); 1 = not the
+"all is well" weekly check-in; 2 = URGENT alerts only. The messages LINE does take are tried there
+FIRST (then the others if LINE refuses); the rest skip LINE. With nothing else set up, LINE is still
+used, and `--status` says so. The "LINE messages this month" line of the weekly check-in appears only
+when LINE is really in use: the main channel, the one kept for urgent alerts, or a backup that had to
+carry something since the last check-in.
+
+How the two are sent:
+
+- **Telegram**: `POST {telegram_api_base}/bot<token>/sendMessage` with `chat_id`, `text` and
+  `link_preview_options: {is_disabled: true}`. No `parse_mode`: plain text, so `_` and `*` in a file
+  name stay as they are. Messages over 4096 characters (UTF-16 units: an emoji counts twice) go in
+  numbered parts. A reply with `"ok": false` counts as failed.
+- **Discord**: `POST <webhook address>` with `content`, `allowed_mentions: {parse: []}` (an
+  `@everyone` in an account or file name pings nobody) and `flags: 4` (no link previews). The text is
+  wrapped in a code block, because Discord reads markdown everywhere: `__init__.php` would come out
+  underlined and `[text](https://…)` in an account name would become a disguised link. Three backticks
+  inside the text are broken up so they cannot close the block. 2000 characters per message; longer
+  ones go in numbered parts, each its own block. `204 No Content` is success.
+- **Too many requests (429)**: when the service asks for a short wait (3 seconds at most) the module
+  waits and tries once more; a longer wait is not sat out (this may run inside a page view): the
+  message goes on to the next channel at once.
+- The Telegram token is part of the request address and the Discord address is the key itself, so
+  neither is ever written to a record, an error reason or `--status`; a reason the service sends back
+  is cleaned of both before it is shown. `line_timeout` is the time limit for all three services.
+
+`php security-alerts-cron.php --test-all` sends the test message to each channel on its own and
+prints, per channel, `sent` or the service's reason ("HTTP 401: Unauthorized" = wrong token,
+"HTTP 400: Bad Request: chat not found" = wrong chat id or the bot was never started,
+"HTTP 404: Unknown Webhook" = the webhook was deleted). The fake server in `scripts/` plays both
+services, including 429, 500 and a slow answer; the modes are listed at the top of that file.
+
+For anything else (Slack, ntfy, SMS…) there is `notifier`:
 
 ```php
 'notifier' => function ($text, $level) {      // 0 = weekly check-in, 1 = notice, 2 = urgent
-    return my_send_somewhere($text);          // true = delivered; false = let LINE / e-mail try
+    return my_send_somewhere($text);          // true = delivered; false = let the next channel try
 },
 ```
 
-The detection does not depend on LINE; only the last step does. With a `notifier`, LINE settings
-can stay empty. If the notifier returns false or throws, the message goes to LINE, then to e-mail,
-exactly as without it. Messages sent this way count towards `daily_cap`. Try yours against
-`scripts/fake_line_server.php` (`POST /hook/anything`) before pointing it at the real service.
+It is tried before all the others. If it returns false or throws, the message goes on down the line.
+Messages sent through any chat channel (yours included) count towards `daily_cap`; e-mail does not.
+Try yours against `scripts/fake_line_server.php` (`POST /hook/anything`) before pointing it at the
+real service.
 
 ## 14. When an alert arrives
 

@@ -46,6 +46,7 @@ php skills/line-security-alerts/scripts/demo.php --lang=zh-TW --site="我的商�
 
 最後那一行「這個月 LINE 發了幾則」是每週順便問 LINE 的：官方帳號每個月能發的則數有上限，用完就發不出去。
 用到八成會變成警告，讓你來得及升級方案或確認備援 Email 有設好。
+如果 LINE 只是備援（平常走 Telegram 或 Discord），而且這段時間都沒用到，就不會出現這一行。
 
 收到通知之後該怎麼做，有一份寫給老闆看的中文說明：
 **[收到通知該怎麼辦](skills/line-security-alerts/reference/when-an-alert-arrives.zh-TW.md)**（建議存在手機裡）。
@@ -99,8 +100,8 @@ php skills/line-security-alerts/scripts/demo.php --lang=zh-TW --site="我的商�
   第一次執行只記錄現況、不發通知。
 - **不拖慢網站**：網站程式只「寫一行紀錄」，不會在客人的請求裡呼叫 LINE。
   檢查與發送由排程（每 5 分鐘）做。
-- **LINE 失敗會改寄 Email**（例如免費方案的每月則數用完）。兩邊都發不出去時，通知會先留著，
-  之後能發了再補發，並標明「這是幾點的通知」，不會只留在主機的紀錄裡。
+- **一個管道失敗會換下一個**：LINE 發不出去（例如免費方案的每月則數用完）就改走 Telegram、Discord 或 Email。
+  全部都發不出去時，通知會先留著，之後能發了再補發，並標明「這是幾點的通知」，不會只留在主機的紀錄裡。
 - **每小時比對一次檔案，每週把全部檔案完整重讀一次**。平常只重讀大小或時間有變的檔（很省）；
   每週那一次不管大小時間，全部重算，連「改完把時間調回去、長度也一樣」的手法都躲不掉。
 - **一個 PHP 檔、不建資料表**：資料存在你指定的資料夾，PHP 7.4～8.x 都能用，不綁任何框架。
@@ -221,9 +222,61 @@ php security-alerts-cron.php --status
 
 詳細步驟與錯誤代碼對照：[reference/line-setup.md](skills/line-security-alerts/reference/line-setup.md)（英文）。
 
-**不用 LINE 可以嗎？** 可以。偵測的部分跟 LINE 無關；設定裡的 `notifier` 可以接你自己的發送方式
-（Telegram、Slack、Discord、簡訊…），它發成功就不會再用 LINE，發失敗才退回 LINE 和 Email。
-寫法見設定範本最後一段。各家服務要的格式不同，請照它們的文件填。
+## 也可以用 Telegram 或 Discord
+
+LINE 每個月能免費發的則數有限（免費方案大約 200 則，各國方案不同），超過要付費。
+所以也內建了 Telegram 和 Discord，兩家都免費。可以只用其中一個，也可以全部設好互相備援。
+
+| | LINE | Telegram | Discord |
+|---|---|---|---|
+| 費用 | 免費方案每月約 200 則，超過要升級付費方案 | 免費 | 免費 |
+| 設定難度 | 中：要開官方帳號、啟用 Messaging API、拿金鑰和 user ID | 低：跟官方機器人 `@BotFather` 要一組金鑰，再查聊天室代號 | 低：在頻道設定裡建一個 Webhook，複製網址 |
+| 會不會馬上看到 | 台灣大部分人整天開著 LINE，最容易馬上看到 | 手機要裝 App、通知要開著 | 手機要裝 App，而且要把這個頻道的通知設成「所有訊息」（很多伺服器預設只通知提到你的訊息） |
+| 金鑰外流會怎樣 | 對方可以用這個官方帳號發訊息給加它好友的人，也會用掉你的則數 | 對方可以完全操控這個機器人：用它發訊息、收到別人傳給它的訊息 | 對方可以在那個頻道發任何訊息，也可以把這個 Webhook 刪掉（刪掉之後通知會自動改走下一個管道） |
+
+不管用哪一家，金鑰都要跟 LINE 的一樣保管：放環境變數，不要進版控、不要截圖分享。
+
+### Telegram 怎麼設
+
+1. 在 Telegram 搜尋 `@BotFather`（有藍色勾勾的官方帳號），傳 `/newbot`，照它的問題取名字。
+   最後會拿到一串像 `123456789:AAH…` 的金鑰，填進 `telegram_bot_token`。
+2. 用手機找到你剛建的機器人，按「開始」。想發到群組：把機器人加進群組，在群組裡傳一個 `/start`。
+3. 用瀏覽器打開 `https://api.telegram.org/bot金鑰/getUpdates`（「金鑰」換成第 1 步那一串），
+   在結果裡找 `"chat":{"id":` 後面的數字，填進 `telegram_chat_id`。群組的數字是負的。
+   這個網址含金鑰，不要截圖分享。
+4. 跑 `php security-alerts-cron.php --test-all`，手機收到就完成了。
+
+### Discord 怎麼設
+
+1. 在要收通知的頻道按「編輯頻道」（齒輪）→「整合」→「Webhook」→「新 Webhook」→「複製 Webhook 網址」。
+   需要「管理 Webhook」的權限。
+2. 網址填進 `discord_webhook_url`。
+3. 手機的 Discord 對這個頻道按住 →「通知設定」→「所有訊息」。
+4. 跑 `php security-alerts-cron.php --test-all`。
+
+Discord 的訊息會放在一個灰色的程式碼框裡：這樣檔名裡的底線、星號不會變成粗體或底線，
+帳號名稱裡就算寫了 `@everyone` 或假連結，也不會叫到整個伺服器、不會變成可以點的連結。
+
+### 好幾個管道都設了，會怎麼發
+
+一次只發一個地方：依序試 **Telegram → Discord → LINE → Email**，第一個發成功就停，不會重複收到。
+（有自己寫的 `notifier` 的話，它最先試。）
+
+想把 LINE 的則數留給真正要緊的事，加一行：
+
+```php
+'line_min_level' => 2,
+```
+
+設成 2：**緊急的先發 LINE**（LINE 發不出去再走其他管道），一般通知和每週報平安都走 Telegram、Discord 或 Email。
+設成 1：只有每週報平安不走 LINE。
+如果除了 LINE 沒有設其他管道，還是會發 LINE（總比發不出去好），`--status` 會提醒你。
+
+`--test-all` 會對每個設好的管道各發一則測試，哪個失敗就寫出原因（例如「HTTP 401: Unauthorized」＝金鑰錯了）。
+`--test` 則只發一則，走「一般通知」的路線，並告訴你最後是哪個管道收下的。
+
+**其他管道（Slack、簡訊…）**：設定裡的 `notifier` 可以接你自己寫的發送方式，它會最先被試，
+發成功就不會再用別的。寫法見設定範本最後一段。
 
 ## 主要設定
 
@@ -231,7 +284,10 @@ php security-alerts-cron.php --status
 |---|---|---|
 | `state_dir` | （必填） | 紀錄與指紋存放處，最好在網站根目錄之外 |
 | `line_channel_access_token`、`line_to` | | LINE 金鑰與收件人（建議放環境變數，不要進版控） |
-| `mail_to` | | LINE 失敗時的備援 Email |
+| `telegram_bot_token`、`telegram_chat_id` | | Telegram 機器人金鑰與聊天室代號（選用）；金鑰放環境變數 |
+| `discord_webhook_url` | | Discord 頻道的 Webhook 網址（選用）；網址本身就是金鑰 |
+| `line_min_level` | 0 | 哪些通知可以用 LINE：0＝全部；1＝每週報平安不用；2＝只有緊急的用（而且先發 LINE） |
+| `mail_to` | | 所有管道都失敗時的備援 Email |
 | `language` | `en` | `en` 或 `zh-TW` |
 | `site_root`、`exclude_dirs`、`upload_dirs`、`runtime_dirs` | | 檔案掃描範圍；快取資料夾記得排除 |
 | `scan_hours` | 1 | 每幾小時比對一次檔案；設 0＝每次排程都比對（每 5 分鐘），只會重讀大小或時間有變的檔 |
@@ -244,7 +300,7 @@ php security-alerts-cron.php --status
 | `line_quota_check` | 開啟 | 每週報平安時順便問 LINE 這個月發了幾則、上限多少 |
 | `witness_file` | | 放在紀錄資料夾「外面」的小檔；紀錄被整個清掉時靠它發現 |
 | `ping_url` | | 外部「排程報到」服務給的網址（選用）；要當成密碼保管，放環境變數 |
-| `notifier` | | 自己的通知管道（選用）；沒設就用 LINE |
+| `notifier` | | 自己寫的通知管道（選用，例如 Slack、簡訊）；最先試 |
 | `login_fail_hour` / `login_fail_ip_hour` | 10 / 5 | 一小時內登入失敗幾次通知 |
 | `firewall_hour` / `firewall_ip_hour` | 50 / 20 | 一小時內擋下幾次通知 |
 | `refund_*`、`cancel_*`、`adjust_*` | 次數 3～5、金額 0（關閉） | 金額依你的幣別自己設定 |
@@ -257,8 +313,9 @@ php security-alerts-cron.php --status
 php skills/line-security-alerts/scripts/selftest.php
 ```
 
-170 項情境測試（登入、裝置、帳號、防火牆、金額、檔案、後門樣式、每週報平安與總指紋、紀錄被清空或被改、
-舊版指紋升級、外部報到、自動隔離、時間被調回去、補發、非 UTF-8 檔名、每日上限、Email 備援…），不連網路。
+204 項情境測試（登入、裝置、帳號、防火牆、金額、檔案、後門樣式、每週報平安與總指紋、紀錄被清空或被改、
+舊版指紋升級、外部報到、自動隔離、時間被調回去、補發、非 UTF-8 檔名、每日上限、Email 備援、
+Telegram／Discord 的發送順序、太長分段、請求太多要等…），不連網路。
 每次更新，GitHub 會自動在 Linux（PHP 7.4～8.5）和 Windows 上把這些測試再跑一遍。
 
 > **⚠️ 防毒軟體可能會跳警告，這是正常的**
@@ -282,11 +339,13 @@ php -S 127.0.0.1:18765 skills/line-security-alerts/scripts/fake_line_server.php
 
 設定裡加上 `'line_api_base' => 'http://127.0.0.1:18765'`，送出的訊息會印在那個終端機上。
 同一支假伺服器也能假扮外部報到服務（`'ping_url' => 'http://127.0.0.1:18765/ping/test'`），不用先去註冊就能試。
+它也能假扮 Telegram 和 Discord（設定方式寫在 `scripts/fake_line_server.php` 開頭），包括「請求太多」「伺服器錯誤」「太慢」這幾種狀況。
 
 ## 安全與隱私
 
 - 金鑰只放在設定檔或環境變數，設定檔不要放進網站公開目錄、不要進版控。外部報到網址（`ping_url`）也一樣，
-  拿到網址的人可以冒充你的網站報到。
+  拿到網址的人可以冒充你的網站報到。Telegram 的金鑰在送出時會變成網址的一部分、Discord 的 Webhook 網址本身就是金鑰，
+  所以這些網址不會寫進任何紀錄、錯誤訊息或 `--status` 的輸出。
 - 檔案指紋用 SHA-256。後台帳號快照只存 Email／密碼雜湊／權限的 SHA-256 指紋，不存原文。
 - 傳到 LINE 的內容只有帳號名稱、IP、檔名、金額這類摘要，不含密碼或客人資料。
 - 外部報到只送出一個不帶任何內容的連線，不會把網站名稱、檔名或通知內容傳給那個服務。

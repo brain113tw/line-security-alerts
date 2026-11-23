@@ -21,7 +21,9 @@
  *     decides what is abnormal and sends ONE combined message.
  *   - The same finding is reported at most once per quiet window (default 6 h); at most
  *     `daily_cap` messages a day, except URGENT ones.
- *   - If LINE fails (token missing, monthly quota used up) it falls back to e-mail.
+ *   - Telegram and Discord are built in as well. A message goes to the first channel that takes it:
+ *     your own notifier → Telegram → Discord → LINE → e-mail (only the ones you set up). With
+ *     `line_min_level` LINE can be kept for the alerts that matter, which are then tried there first.
  *   - First run records a baseline (admin list, devices, file fingerprints) and reports nothing.
  *   - Everything is stored as files in `state_dir`; no database tables are created.
  *   - It watches itself: a weekly "still on duty" message that carries one fingerprint of all code
@@ -66,10 +68,28 @@ final class SecurityAlerts
             'line_channel_access_token' => '',
             'line_to'            => array(),       // userId(s) "U…" or groupId(s) "C…"
             'line_api_base'      => 'https://api.line.me',   // point to a fake server in tests
-            'line_timeout'       => 8,
+            'line_timeout'       => 8,             // seconds; also used for Telegram and Discord
             /* Once a week (with the check-in) ask LINE how many messages this account has sent this month and what
-               its limit is. When the limit is reached LINE stops delivering, so it is better to see it coming. */
+               its limit is. When the limit is reached LINE stops delivering, so it is better to see it coming.
+               Asked only when LINE is really in use: not when it is just a backup that sent nothing that week. */
             'line_quota_check'   => true,
+            /* Which messages may use LINE (to keep its monthly allowance for what matters).
+               0 = every message (default). 1 = alerts only: the "all is well" weekly check-in goes elsewhere.
+               2 = URGENT alerts only: notices and the check-in go to Telegram / Discord / your notifier / e-mail.
+               With 1 or 2 the messages LINE does take are tried on LINE first. When no other channel is set up,
+               everything still goes to LINE rather than nowhere (and --status points it out). */
+            'line_min_level'     => 0,
+
+            /* Telegram (optional): a bot token from @BotFather and the chat to write to (a number, negative for a
+               group; one id or an array). Sent as plain text without link previews. The token gives full control
+               of the bot: keep it out of version control. */
+            'telegram_bot_token' => '',
+            'telegram_chat_id'   => '',
+            'telegram_api_base'  => 'https://api.telegram.org',   // point to a fake server in tests
+
+            /* Discord (optional): a channel webhook address (one or an array). The address IS the key: whoever has
+               it can post to that channel. Mentions such as @everyone in a message never ping anybody. */
+            'discord_webhook_url' => '',
 
             /* E-mail fallback (PHP mail()) */
             'mail_to'            => '',
@@ -142,8 +162,9 @@ final class SecurityAlerts
             'extra_rules'        => array(),
             'disable_rules'      => array(),       // ids of built-in rules to switch off (see suspiciousRules())
 
-            /* Your own channel (Telegram, Slack, Discord, ntfy, SMS…): function(string $text, int $level): bool.
-               Tried first; when it returns false (or is not set) the message goes to LINE, then to e-mail. */
+            /* Your own channel (Slack, ntfy, SMS…): function(string $text, int $level): bool.
+               Tried first; when it returns false (or is not set) the message goes on to Telegram, Discord, LINE,
+               then e-mail. */
             'notifier'           => null,
 
             /* Dependency injection (tests, custom HTTP / mail) */
@@ -152,6 +173,7 @@ final class SecurityAlerts
             'renamer'            => null,          // function(string $from, string $to): bool  (used by quarantine_uploads)
             'mailer'             => null,          // function(string $to, string $subject, string $text, string $from): bool
             'clock'              => null,          // function(): int
+            'sleeper'            => null,          // function(float $seconds): void  (the short wait after "too many requests")
         );
     }
 
@@ -310,10 +332,36 @@ final class SecurityAlerts
         }
     }
 
-    /** Sends one test message right now (ignores the quiet window and the daily cap). Returns 'custom' | 'line' | 'mail' | 'failed'. */
+    /**
+     * Sends one test message right now (ignores the quiet window and the daily cap), the way a notice would go.
+     * Returns the channel that took it: 'custom' | 'telegram' | 'discord' | 'line' | 'mail' | 'failed'.
+     */
     public function sendTest()
     {
-        return $this->deliver($this->t('header', $this->cfg['site_name'], date('m/d H:i', $this->now())) . "\n\n" . $this->t('test_body'));
+        return $this->deliver($this->testText());
+    }
+
+    /**
+     * Sends the test message to EVERY channel that is set up, each on its own, so a setup mistake on one of
+     * them is not hidden by the next one taking over. Read-only otherwise.
+     *
+     * @return array channel => array('ok' => bool, 'why' => short reason when it failed, e.g. "HTTP 401: Unauthorized")
+     */
+    public function testEachChannel()
+    {
+        $text = $this->testText();
+        $out = array();
+        foreach (array_keys($this->channels()) as $ch)
+        {
+            $r = $this->sendVia($ch, $text);
+            $out[$ch] = array('ok' => $r[0], 'why' => $r[0] ? '' : $r[1]);
+        }
+        return $out;
+    }
+
+    private function testText()
+    {
+        return $this->t('header', $this->cfg['site_name'], date('m/d H:i', $this->now())) . "\n\n" . $this->t('test_body');
     }
 
     /** Forget all file fingerprints; the next scan records a fresh baseline silently. */
@@ -436,7 +484,8 @@ final class SecurityAlerts
 
     /**
      * Where things stand right now, for the person who installed it or is asked "is it still working?".
-     * Read-only: nothing is sent, nothing is changed. No token, recipient id or check-in address is included.
+     * Read-only: nothing is sent, nothing is changed. No token, recipient or chat id, webhook or check-in address
+     * is included: only how many there are.
      *
      * @param  int $recent how many of the latest findings to include
      * @return array see the keys below; 'problems' lists what needs a look (empty = fine)
@@ -455,7 +504,8 @@ final class SecurityAlerts
         $scan = (bool) $this->cfg['file_scan'];
         $fp = ($scan && !empty($state['files_baselined'])) ? $this->fingerprint() : null;
         $days = (int) $this->cfg['heartbeat_days'];
-        $line = (string) $this->cfg['line_channel_access_token'] !== '' && (bool) $this->cfg['line_to'];
+        $on = $this->channels();
+        $line = isset($on['line']);
         $out = array(
             'now'          => $now,
             'site_name'    => (string) $this->cfg['site_name'],
@@ -463,10 +513,17 @@ final class SecurityAlerts
             'installed_at' => !empty($state['installed_at']) ? (int) $state['installed_at'] : null,
             'last_run'     => !empty($state['last_run']) ? (int) $state['last_run'] : null,
             'delivery'     => array(
-                'notifier' => is_callable($this->cfg['notifier']),
+                'notifier' => isset($on['custom']),
+                'telegram' => isset($on['telegram']),
+                'telegram_chats' => isset($on['telegram']) ? count($this->listOf($this->cfg['telegram_chat_id'])) : 0,
+                'discord' => isset($on['discord']),
+                'discord_webhooks' => isset($on['discord']) ? count($this->listOf($this->cfg['discord_webhook_url'])) : 0,
                 'line' => $line,
-                'line_recipients' => $line ? count((array) $this->cfg['line_to']) : 0,
-                'mail' => (string) $this->cfg['mail_to'] !== '',
+                'line_recipients' => $line ? count($this->listOf($this->cfg['line_to'])) : 0,
+                'mail' => isset($on['mail']),
+                'line_min_level' => (int) $this->cfg['line_min_level'],
+                /* the order channels are tried in, for each kind of message (only the ones set up) */
+                'route' => array('urgent' => $this->route(self::URGENT), 'notice' => $this->route(self::NOTICE), 'checkin' => $this->route(self::LOG)),
             ),
             'sent_today'   => (isset($state['push_day']) && $state['push_day'] === date('Y-m-d', $now)) ? (int) $state['push_count'] : 0,
             'daily_cap'    => (int) $this->cfg['daily_cap'],
@@ -524,8 +581,20 @@ final class SecurityAlerts
         $stale = max(900, 3 * (int) $this->cfg['tick_seconds']);
         if ($out['last_run'] === null) { $p[] = 'the checks have never run here'; }
         elseif ($now - $out['last_run'] > $stale) { $p[] = 'no check for ' . (int) round(($now - $out['last_run']) / 60) . ' minutes: is the scheduled job still there?'; }
-        if (!$out['delivery']['notifier'] && !$line && !$out['delivery']['mail']) { $p[] = 'nowhere to send alerts: no LINE token/recipient, no e-mail, no notifier'; }
-        elseif (!$out['delivery']['notifier'] && $line && !$out['delivery']['mail']) { $p[] = 'no fallback e-mail (mail_to): when LINE refuses, alerts wait instead of arriving'; }
+        $chat = array_values(array_diff(array_keys($on), array('custom', 'mail')));   // the chat apps that are set up
+        $names = array('custom' => 'your notifier', 'telegram' => 'Telegram', 'discord' => 'Discord', 'line' => 'LINE', 'mail' => 'e-mail');
+        if (!$on) { $p[] = 'nowhere to send alerts: no LINE, Telegram or Discord, no e-mail, no notifier'; }
+        elseif (!isset($on['custom']) && !isset($on['mail']) && count($chat) === 1) { $p[] = 'no fallback e-mail (mail_to): when ' . $names[$chat[0]] . ' refuses, alerts wait instead of arriving'; }
+        $min = (int) $this->cfg['line_min_level'];
+        if ($min > 0 && $line && count($on) === 1)
+        {
+            $p[] = 'line_min_level is ' . $min . ', but no other channel is set up (Telegram, Discord, notifier or e-mail): every message still goes to LINE';
+        }
+        elseif ($min > 0 && !$line && $on)
+        {
+            $first = $this->route(self::URGENT);
+            $p[] = 'line_min_level is ' . $min . ', but LINE is not set up: urgent alerts go to ' . $names[$first[0]] . ' like everything else';
+        }
         if ($out['waiting']['count'] > 0) { $p[] = $out['waiting']['count'] . ' alert(s) could not be delivered yet and are waiting to be re-sent'; }
         if ($out['outside_checkin']['failing'] >= 3) { $p[] = 'the outside check-in address has failed ' . $out['outside_checkin']['failing'] . ' times in a row'; }
         if ($scan && !$out['files']['baseline_ready'] && $out['last_run'] !== null) { $p[] = 'the file baseline is not complete yet'; }
@@ -1447,7 +1516,7 @@ final class SecurityAlerts
                     $status[$i] = $r;
                     $alerted[$findings[$i]['key']] = $now;   // delivered, or queued just below: either way it is not found "again"
                 }
-                if ($r === 'line' || $r === 'custom')
+                if ($this->isChat($r))
                 {
                     $state['push_day'] = $day;
                     $state['push_count'] = $used + 1;
@@ -1475,6 +1544,7 @@ final class SecurityAlerts
                     $hb = $this->tally($state, $now);
                     $hb['sent'] += count($send);
                     foreach ($send as $i) { if ($findings[$i]['level'] >= self::URGENT) { $hb['urgent']++; } }
+                    if ($r === 'line') { $hb['line']++; }
                     $state['hb'] = $hb;
                 }
                 $result = $r;
@@ -1489,7 +1559,7 @@ final class SecurityAlerts
             {
                 /* Every one of these means the recorded baseline moved. The weekly check-in uses the two counts
                    to explain a changed fingerprint: the owner was told / it was only written to the log. */
-                $hb[in_array($status[$i], array('line', 'mail', 'custom'), true) ? 'files_sent' : 'files_quiet']++;
+                $hb[$this->isChat($status[$i]) || $status[$i] === 'mail' ? 'files_sent' : 'files_quiet']++;
             }
             $this->append('findings.ndjson', array('t' => $now, 'level' => $f['level'], 'kind' => $f['kind'], 'key' => $f['key'],
                 'title' => $f['title'], 'lines' => $f['lines'], 'status' => $status[$i]));
@@ -1541,7 +1611,7 @@ final class SecurityAlerts
                 continue;
             }
             $done++;
-            if ($r === 'line' || $r === 'custom')
+            if ($this->isChat($r))
             {
                 $day = date('Y-m-d', $now);
                 $state['push_count'] = ((isset($state['push_day']) && $state['push_day'] === $day) ? (int) $state['push_count'] : 0) + 1;
@@ -1550,6 +1620,7 @@ final class SecurityAlerts
             $hb = $this->tally($state, $now);
             $hb['sent'] += isset($item['n']) ? (int) $item['n'] : 1;
             $hb['urgent'] += isset($item['u']) ? (int) $item['u'] : 0;
+            if ($r === 'line') { $hb['line']++; }
             $files = isset($item['files']) ? (int) $item['files'] : 0;
             if ($files > 0)
             {
@@ -1579,7 +1650,7 @@ final class SecurityAlerts
     private function tally(array $state, $now)
     {
         $hb = isset($state['hb']) && is_array($state['hb']) ? $state['hb'] : array();
-        return $hb + array('at' => $now, 'runs' => 0, 'sent' => 0, 'urgent' => 0, 'files_sent' => 0, 'files_quiet' => 0);
+        return $hb + array('at' => $now, 'runs' => 0, 'sent' => 0, 'urgent' => 0, 'files_sent' => 0, 'files_quiet' => 0, 'line' => 0);
     }
 
     /**
@@ -1611,7 +1682,7 @@ final class SecurityAlerts
     /**
      * Once every `heartbeat_days`, in the daytime, say "still on duty" with a few numbers. If the cron job
      * dies, the token expires or the server is rebuilt without the module, the owner notices because the
-     * weekly message stops coming. Returns 'off' | 'not due' | 'waiting for daytime' | 'custom' | 'line' | 'mail' | 'failed'.
+     * weekly message stops coming. Returns 'off' | 'not due' | 'waiting for daytime' | a channel name (see deliver()) | 'failed'.
      */
     private function heartbeat(array &$state, $now)
     {
@@ -1689,7 +1760,9 @@ final class SecurityAlerts
                 $body[] = $this->t('hb_ping_ok');
             }
         }
-        $quota = $this->lineQuota();
+        /* LINE's monthly allowance, only when LINE is really in use: the main channel (or the one kept for urgent
+           alerts), or a backup that did have to carry something since the last check-in */
+        $quota = ($this->lineIsMain() || (int) $hb['line'] > 0) ? $this->lineQuota() : null;
         if ($quota !== null)
         {
             if ($quota['used'] >= $quota['limit'])
@@ -1714,7 +1787,7 @@ final class SecurityAlerts
         $today = date('Y-m-d', $now);
         if ($r !== 'failed')
         {
-            $state['hb'] = array('at' => $now, 'runs' => 0, 'sent' => 0, 'urgent' => 0, 'files_sent' => 0, 'files_quiet' => 0);
+            $state['hb'] = array('at' => $now, 'runs' => 0, 'sent' => 0, 'urgent' => 0, 'files_sent' => 0, 'files_quiet' => 0, 'line' => 0);
             if ($code !== null)
             {
                 $state['hb_fp'] = $code;
@@ -1809,49 +1882,417 @@ final class SecurityAlerts
         return $ok ? 'ok' : 'failed';
     }
 
-    /** @return string 'custom' | 'line' | 'mail' | 'failed' */
+    /**
+     * Sends one message through the first channel that takes it (see route()).
+     *
+     * @return string the channel that took it: 'custom' | 'telegram' | 'discord' | 'line' | 'mail'; or 'failed'
+     */
     private function deliver($text, $level = self::NOTICE)
     {
-        if (is_callable($this->cfg['notifier']))
+        foreach ($this->route((int) $level) as $ch)
         {
-            /* Your own channel first. If it says no (or breaks), LINE and e-mail below are still tried. */
-            try
+            $r = $this->sendVia($ch, $text, $level);
+            if ($r[0])
             {
-                if (call_user_func($this->cfg['notifier'], $text, (int) $level))
-                {
-                    return 'custom';
-                }
+                return $ch;
             }
-            catch (Throwable $e)
-            {
-            }
-        }
-        $ok = 0;
-        $token = (string) $this->cfg['line_channel_access_token'];
-        if ($token !== '' && $this->cfg['line_to'])
-        {
-            foreach ((array) $this->cfg['line_to'] as $to)
-            {
-                $body = $this->json(array('to' => (string) $to, 'messages' => array(array('type' => 'text', 'text' => $text))), JSON_UNESCAPED_UNICODE);
-                list($code) = $this->http(rtrim($this->cfg['line_api_base'], '/') . '/v2/bot/message/push',
-                    array('Content-Type: application/json', 'Authorization: Bearer ' . $token), $body);
-                if ($code >= 200 && $code < 300) { $ok++; }
-            }
-        }
-        if ($ok > 0)
-        {
-            return 'line';
-        }
-        if ($this->cfg['mail_to'] !== '')
-        {
-            $subject = $this->t('mail_subject', $this->cfg['site_name']);
-            $sent = is_callable($this->cfg['mailer'])
-                ? (bool) call_user_func($this->cfg['mailer'], $this->cfg['mail_to'], $subject, $text, $this->cfg['mail_from'])
-                : @mail($this->cfg['mail_to'], '=?UTF-8?B?' . base64_encode($subject) . '?=', $text,
-                    'Content-Type: text/plain; charset=UTF-8' . ($this->cfg['mail_from'] !== '' ? "\r\nFrom: " . $this->cfg['mail_from'] : ''));
-            if ($sent) { return 'mail'; }
         }
         return 'failed';
+    }
+
+    /** The channels that are set up, in the order they are normally tried. @return array name => true */
+    private function channels()
+    {
+        $on = array();
+        if (is_callable($this->cfg['notifier'])) { $on['custom'] = true; }
+        if (trim((string) $this->cfg['telegram_bot_token']) !== '' && $this->listOf($this->cfg['telegram_chat_id'])) { $on['telegram'] = true; }
+        if ($this->listOf($this->cfg['discord_webhook_url'])) { $on['discord'] = true; }
+        if ((string) $this->cfg['line_channel_access_token'] !== '' && $this->listOf($this->cfg['line_to'])) { $on['line'] = true; }
+        if ((string) $this->cfg['mail_to'] !== '') { $on['mail'] = true; }
+        return $on;
+    }
+
+    /**
+     * The order the channels are tried in for a message of this level. Normally: your notifier, Telegram,
+     * Discord, LINE, e-mail. With `line_min_level`, LINE goes first for the messages at or above that level and
+     * is left out for the others, unless nothing else is set up (better on LINE than nowhere).
+     */
+    private function route($level)
+    {
+        $on = array_keys($this->channels());
+        $min = (int) $this->cfg['line_min_level'];
+        if ($min <= 0 || !in_array('line', $on, true))
+        {
+            return $on;
+        }
+        $others = array_values(array_diff($on, array('line')));
+        if ($level >= $min)
+        {
+            return array_merge(array('line'), $others);
+        }
+        return $others ? $others : array('line');
+    }
+
+    /** LINE carries messages of its own, not only as a backup behind other channels. */
+    private function lineIsMain()
+    {
+        foreach (array(self::URGENT, self::NOTICE) as $level)
+        {
+            $r = $this->route($level);
+            if ($r && $r[0] === 'line')
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** Delivered to a chat app (counts towards daily_cap). */
+    private function isChat($r)
+    {
+        return in_array($r, array('custom', 'telegram', 'discord', 'line'), true);
+    }
+
+    /** '' / one value / an array of values -> a list of the non-empty ones */
+    private function listOf($v)
+    {
+        $out = array();
+        foreach ((array) $v as $x)
+        {
+            if (is_scalar($x) && trim((string) $x) !== '')
+            {
+                $out[] = trim((string) $x);
+            }
+        }
+        return $out;
+    }
+
+    /** @return array array(bool $delivered, string $whyNot); the reason never contains a token or an address */
+    private function sendVia($ch, $text, $level = self::NOTICE)
+    {
+        try
+        {
+            switch ($ch)
+            {
+                case 'custom':
+                    /* Your own channel. If it says no (or breaks), the next channel is tried. */
+                    return call_user_func($this->cfg['notifier'], $text, (int) $level) ? array(true, '') : array(false, 'the notifier returned false');
+                case 'telegram':
+                    return $this->sendTelegram($text);
+                case 'discord':
+                    return $this->sendDiscord($text);
+                case 'line':
+                    return $this->sendLine($text);
+                case 'mail':
+                    return $this->sendMail($text);
+            }
+        }
+        catch (Throwable $e)
+        {
+            return array(false, 'an error inside the ' . $ch . ' channel');   // the exception text could quote an address: not shown
+        }
+        return array(false, 'unknown channel');
+    }
+
+    private function sendLine($text)
+    {
+        $ok = 0;
+        $why = '';
+        $url = rtrim((string) $this->cfg['line_api_base'], '/') . '/v2/bot/message/push';
+        $headers = array('Content-Type: application/json', 'Authorization: Bearer ' . (string) $this->cfg['line_channel_access_token']);
+        foreach ($this->listOf($this->cfg['line_to']) as $to)
+        {
+            $body = $this->json(array('to' => $to, 'messages' => array(array('type' => 'text', 'text' => $text))), JSON_UNESCAPED_UNICODE);
+            $r = (array) $this->http($url, $headers, $body);
+            $code = isset($r[0]) ? (int) $r[0] : 0;
+            if ($code >= 200 && $code < 300)
+            {
+                $ok++;
+            }
+            else
+            {
+                $why = $this->failReason($code, isset($r[1]) ? (string) $r[1] : '');
+            }
+        }
+        return array($ok > 0, $ok > 0 ? '' : $why);
+    }
+
+    private function sendMail($text)
+    {
+        $subject = $this->t('mail_subject', $this->cfg['site_name']);
+        $sent = is_callable($this->cfg['mailer'])
+            ? (bool) call_user_func($this->cfg['mailer'], $this->cfg['mail_to'], $subject, $text, $this->cfg['mail_from'])
+            : @mail($this->cfg['mail_to'], '=?UTF-8?B?' . base64_encode($subject) . '?=', $text,
+                'Content-Type: text/plain; charset=UTF-8' . ($this->cfg['mail_from'] !== '' ? "\r\nFrom: " . $this->cfg['mail_from'] : ''));
+        return array((bool) $sent, $sent ? '' : 'the mail function did not accept the message');
+    }
+
+    /**
+     * Telegram Bot API, sendMessage. Plain text: no parse_mode, so "_" or "*" in a file name stay as they are.
+     * No link preview. Telegram takes up to 4096 characters; a longer message is sent in parts.
+     * The token is part of the address, which is why the address is never written anywhere.
+     */
+    private function sendTelegram($text)
+    {
+        $token = trim((string) $this->cfg['telegram_bot_token']);
+        if (!preg_match('/^[0-9]+:[A-Za-z0-9_-]+$/', $token))
+        {
+            return array(false, 'the bot token does not look like "123456789:ABC..." (the form @BotFather gives)');
+        }
+        $url = rtrim((string) $this->cfg['telegram_api_base'], '/') . '/bot' . $token . '/sendMessage';
+        $parts = $this->split($text, 4000);
+        $ok = 0;
+        $why = '';
+        foreach ($this->listOf($this->cfg['telegram_chat_id']) as $chat)
+        {
+            $all = true;
+            foreach ($parts as $part)
+            {
+                $body = $this->json(array('chat_id' => $chat, 'text' => $part, 'link_preview_options' => array('is_disabled' => true)), JSON_UNESCAPED_UNICODE);
+                $r = $this->post($url, $body);
+                if (!$r[0])
+                {
+                    $all = false;
+                    $why = $r[1];
+                    break;
+                }
+            }
+            if ($all)
+            {
+                $ok++;
+            }
+        }
+        return array($ok > 0, $ok > 0 ? '' : $why);
+    }
+
+    /**
+     * Discord webhook. Discord reads markdown in every message, so a file name like __init__.php would come out
+     * underlined and an account name like [reset](https://…) as a disguised link. The text therefore goes inside
+     * a code block, where everything shows exactly as written and nothing is a link. allowed_mentions with an
+     * empty list: an "@everyone" in a file or account name never pings anybody. 2000 characters per message;
+     * a longer one is sent in parts. The address is the key, so it is never written anywhere.
+     */
+    private function sendDiscord($text)
+    {
+        $text = str_replace('```', "`\u{200B}`\u{200B}`", $text);   // three backticks in a name cannot end the code block early
+        $parts = $this->split($text, 1990 - 8);                     // 8 = the code block's own "```\n" and "\n```"
+        $ok = 0;
+        $why = '';
+        foreach ($this->listOf($this->cfg['discord_webhook_url']) as $url)
+        {
+            if (!preg_match('#^https?://\S+$#i', $url))
+            {
+                $why = 'the webhook address does not start with https://';
+                continue;
+            }
+            $all = true;
+            foreach ($parts as $part)
+            {
+                /* flags 4 = no link previews */
+                $body = $this->json(array('content' => "```\n" . $part . "\n```", 'allowed_mentions' => array('parse' => array()), 'flags' => 4), JSON_UNESCAPED_UNICODE);
+                $r = $this->post($url, $body);
+                if (!$r[0])
+                {
+                    $all = false;
+                    $why = $r[1];
+                    break;
+                }
+            }
+            if ($all)
+            {
+                $ok++;
+            }
+        }
+        return array($ok > 0, $ok > 0 ? '' : $why);
+    }
+
+    /**
+     * One JSON POST to Telegram or Discord. On "too many requests" with a short wait asked for (3 seconds at
+     * most) it waits and tries once more; a longer wait is not sat out (this may run inside a page view): the
+     * message goes on to the next channel instead.
+     *
+     * @return array array(bool $ok, string $whyNot)
+     */
+    private function post($url, $body)
+    {
+        for ($try = 0; ; $try++)
+        {
+            $r = (array) $this->http($url, array('Content-Type: application/json'), $body);
+            $code = isset($r[0]) ? (int) $r[0] : 0;
+            $resp = isset($r[1]) ? (string) $r[1] : '';
+            $json = json_decode($resp, true);
+            /* Telegram says {"ok":false,…} on errors; Discord answers 204 with no body */
+            if ($code >= 200 && $code < 300 && !(is_array($json) && isset($json['ok']) && $json['ok'] === false))
+            {
+                return array(true, '');
+            }
+            if ($code === 429 && $try === 0)
+            {
+                $wait = $this->retryAfter($json);
+                if ($wait !== null && $wait <= 3)
+                {
+                    $this->pause($wait);
+                    continue;
+                }
+            }
+            return array(false, $this->failReason($code, $resp) . ($code === 429 && $try > 0 ? ' (after one retry)' : ''));
+        }
+    }
+
+    /** Seconds to wait from a 429 answer: Telegram {"parameters":{"retry_after":5}}, Discord {"retry_after":0.5}. */
+    private function retryAfter($json)
+    {
+        if (!is_array($json))
+        {
+            return null;
+        }
+        if (isset($json['parameters']['retry_after']) && is_numeric($json['parameters']['retry_after']))
+        {
+            return max(0.0, (float) $json['parameters']['retry_after']);
+        }
+        if (isset($json['retry_after']) && is_numeric($json['retry_after']))
+        {
+            return max(0.0, (float) $json['retry_after']);
+        }
+        return null;
+    }
+
+    private function pause($seconds)
+    {
+        if (is_callable($this->cfg['sleeper']))
+        {
+            call_user_func($this->cfg['sleeper'], (float) $seconds);
+            return;
+        }
+        usleep((int) round((min(3.0, $seconds) + 0.1) * 1000000));
+    }
+
+    /** "HTTP 401: Unauthorized": the service's own short explanation, with every secret of ours taken out. */
+    private function failReason($code, $resp)
+    {
+        if ($code <= 0)
+        {
+            return 'no answer (could not connect, or it timed out)';
+        }
+        $msg = '';
+        $json = json_decode((string) $resp, true);
+        if (is_array($json))
+        {
+            foreach (array('description', 'message') as $k)   // Telegram; Discord and LINE
+            {
+                if (isset($json[$k]) && is_string($json[$k]))
+                {
+                    $msg = $json[$k];
+                    break;
+                }
+            }
+        }
+        $secrets = array_merge(array(trim((string) $this->cfg['telegram_bot_token']), (string) $this->cfg['line_channel_access_token']),
+            $this->listOf($this->cfg['discord_webhook_url']));
+        foreach ($secrets as $s)
+        {
+            if (strlen($s) >= 8)
+            {
+                $msg = str_replace($s, '…', $msg);
+            }
+        }
+        $msg = trim((string) preg_replace('/\s+/u', ' ', $this->clean($msg)));
+        return 'HTTP ' . (int) $code . ($msg !== '' ? ': ' . $this->cut($msg, 120) : '');
+    }
+
+    /**
+     * Splits a message at line breaks into parts of at most $limit UTF-16 code units (the unit Telegram and
+     * Discord count in: an emoji is two). When there is more than one part, each starts with "(1/2) " and so
+     * on. At most 4 parts; the rest is cut with "…" (messages are composed much shorter than that anyway).
+     */
+    private function split($text, $limit)
+    {
+        if ($this->units($text) <= $limit)
+        {
+            return array($text);
+        }
+        $budget = $limit - 8;   // room for "(1/4) "
+        $parts = array();
+        $cur = '';
+        foreach (explode("\n", $text) as $line)
+        {
+            while ($this->units($line) > $budget)   // one line longer than a whole part: fill up the part, go on in the next
+            {
+                $room = $cur === '' ? $budget : $budget - $this->units($cur) - 1;
+                if ($room < 2)   // 2 = the widest character
+                {
+                    $parts[] = $cur;
+                    $cur = '';
+                    continue;
+                }
+                $head = $this->cutUnits($line, $room);
+                $parts[] = $cur === '' ? $head : $cur . "\n" . $head;
+                $cur = '';
+                $line = (string) substr($line, strlen($head));
+            }
+            $try = $cur === '' ? $line : $cur . "\n" . $line;
+            if ($cur !== '' && $this->units($try) > $budget)
+            {
+                $parts[] = $cur;
+                $cur = $line;
+            }
+            else
+            {
+                $cur = $try;
+            }
+        }
+        if ($cur !== '')
+        {
+            $parts[] = $cur;
+        }
+        if (count($parts) > 4)
+        {
+            $parts = array_slice($parts, 0, 4);
+            $parts[3] = $this->cutUnits($parts[3], $budget - 2) . "\n…";
+        }
+        $n = count($parts);
+        foreach ($parts as $i => $p)
+        {
+            $parts[$i] = '(' . ($i + 1) . '/' . $n . ') ' . $p;
+        }
+        return $parts;
+    }
+
+    /** Length in UTF-16 code units, without needing ext-mbstring. */
+    private function units($s)
+    {
+        $cp = @preg_match_all('/./us', (string) $s);
+        if ($cp === false)
+        {
+            return strlen((string) $s);   // not valid UTF-8: bytes, which can only over-count
+        }
+        return $cp + (int) preg_match_all('/[\x{10000}-\x{10FFFF}]/u', (string) $s);
+    }
+
+    /** The longest start of $s that is at most $n UTF-16 code units, cut between characters. */
+    private function cutUnits($s, $n)
+    {
+        if ($this->units($s) <= $n)
+        {
+            return $s;
+        }
+        if (!@preg_match_all('/./us', $s, $m))
+        {
+            return substr($s, 0, max(1, $n));
+        }
+        $out = '';
+        $u = 0;
+        foreach ($m[0] as $ch)
+        {
+            $w = strlen($ch) === 4 ? 2 : 1;
+            if ($u + $w > $n)
+            {
+                break;
+            }
+            $out .= $ch;
+            $u += $w;
+        }
+        return $out === '' ? $m[0][0] : $out;   // always move forward, even with an absurdly small $n
     }
 
     private function http($url, array $headers, $body, $method = 'POST')
@@ -2223,8 +2664,8 @@ final class SecurityAlerts
                 'hb_fp_diff_none' => '⚠ Code fingerprint: %s (was %s). It changed, yet no code change is on record in between: the fingerprint records may have been tampered with. Handle it as a possible backdoor.',
                 'hb_ping_ok' => 'Outside check-in: working (if the schedule stops, that service tells you).',
                 'hb_quota' => 'LINE messages this month: about %d of %d used.',
-                'hb_quota_low' => '⚠ LINE messages this month: about %d of %d used. Once the limit is reached LINE stops delivering; alerts then go by e-mail, or wait until they can be sent.',
-                'hb_quota_out' => '⚠ LINE messages this month: the limit of %d is used up (about %d sent). Alerts cannot reach LINE until next month or a bigger plan; make sure a fallback e-mail is set.',
+                'hb_quota_low' => '⚠ LINE messages this month: about %d of %d used. Once the limit is reached LINE stops delivering; alerts then go to your other channels (Telegram, Discord, e-mail), or wait until they can be sent.',
+                'hb_quota_out' => '⚠ LINE messages this month: the limit of %d is used up (about %d sent). Alerts cannot reach LINE until next month or a bigger plan; make sure another channel (e-mail, Telegram or Discord) is set.',
                 'hb_ping_bad' => '⚠ The outside check-in address has failed %d time(s) in a row (since %s). Have your developer check ping_url, or nobody will tell you when the schedule stops.',
                 'hb_since' => 'Records go back to %s. If that date is newer than you remember, the records were reset: ask why.',
                 'hb_hint' => 'You get this once a week. If a week passes without it, the checks have stopped running.',
@@ -2299,8 +2740,8 @@ final class SecurityAlerts
                 'hb_fp_diff_none' => '⚠ 程式總指紋：%s（上次是 %s）。指紋變了，但這段時間沒有任何程式變動的紀錄，指紋紀錄可能被動過手腳。請當成「主機上可能有後門」處理。',
                 'hb_ping_ok' => '外部報到：正常（排程一停，外部服務會另外通知你）。',
                 'hb_quota' => '這個月 LINE 大約發了 %d 則，上限 %d 則。',
-                'hb_quota_low' => '⚠ 這個月 LINE 大約發了 %d 則，上限 %d 則，快用完了。用完之後 LINE 就發不出去：通知會改寄 Email，沒設 Email 就先留著，等能發再補。',
-                'hb_quota_out' => '⚠ 這個月 LINE 的 %d 則已經用完（大約發了 %d 則）。到下個月或升級方案之前，通知到不了 LINE；請確認有設定備援的 Email。',
+                'hb_quota_low' => '⚠ 這個月 LINE 大約發了 %d 則，上限 %d 則，快用完了。用完之後 LINE 就發不出去：通知會改走其他管道（Telegram、Discord、Email），都沒設就先留著，等能發再補。',
+                'hb_quota_out' => '⚠ 這個月 LINE 的 %d 則已經用完（大約發了 %d 則）。到下個月或升級方案之前，通知到不了 LINE；請確認有設定其他管道（Email、Telegram 或 Discord）。',
                 'hb_ping_bad' => '⚠ 外部報到網址已經連續失敗 %d 次（從 %s 起）。請工程師檢查設定裡的 ping_url，不然排程停了不會有人通知你。',
                 'hb_since' => '紀錄從 %s 開始。這個日期如果比你記得的新，代表紀錄被重設過，要問清楚原因。',
                 'hb_hint' => '這則每週一次。哪一週沒收到，代表檢查沒在跑。',

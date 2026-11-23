@@ -1,7 +1,7 @@
 <?php
 /**
  * Example configuration. Copy it next to your app (NOT into a public web folder), rename it to
- * security-alerts.config.php, and keep it out of version control — it holds your LINE token.
+ * security-alerts.config.php, and keep it out of version control — it holds your LINE / Telegram / Discord keys.
  *
  * Every key is optional except state_dir; see SecurityAlerts::defaults() for the full list.
  */
@@ -22,7 +22,15 @@ return array(
     // 'line_api_base'         => 'http://127.0.0.1:8765',   // the fake server in scripts/, for trying things out
     // 'line_quota_check'      => false,                     // do not ask LINE once a week how much of the monthly allowance is used
 
-    /* If LINE refuses (no token, monthly quota used up), alerts go here instead. */
+    /* Telegram and Discord (optional; leave empty to not use them). Setup steps are in the README.
+       A message goes to the first channel that takes it: Telegram, then Discord, then LINE, then e-mail. */
+    'telegram_bot_token'  => (string) getenv('TELEGRAM_ALERT_TOKEN'),      // "123456789:ABC…" from @BotFather
+    'telegram_chat_id'    => (string) getenv('TELEGRAM_ALERT_CHAT'),       // e.g. 123456789 (you) or -1001234567890 (a group)
+    'discord_webhook_url' => (string) getenv('DISCORD_ALERT_WEBHOOK'),     // https://discord.com/api/webhooks/…
+    // 'line_min_level'   => 2,     // keep LINE for URGENT alerts only (tried there first); everything else goes to
+                                    // Telegram / Discord / e-mail. 1 = everything except the "all is well" weekly check-in.
+
+    /* If the channels above refuse (no token, monthly quota used up), alerts go here instead. */
     'mail_to'   => (string) getenv('ALERT_MAIL_TO'),
     'mail_from' => '',
 
@@ -80,8 +88,8 @@ return array(
     // ),
     // 'disable_rules' => array('blob'),      // switch off a built-in rule that keeps matching your own code
 
-    /* Optional: another channel instead of (or before) LINE — Telegram, Slack, Discord, ntfy, SMS…
-       Return true when the message was accepted; return false and LINE / e-mail are used as usual.
+    /* Optional: a channel that is not built in — Slack, ntfy, SMS… It is tried before all the others.
+       Return true when the message was accepted; return false and the next channel is used as usual.
        $level: 0 = weekly check-in, 1 = notice, 2 = urgent. Check your service's documentation for the
        exact request it wants; this is only the shape. */
     // 'notifier' => function ($text, $level) {

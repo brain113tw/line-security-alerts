@@ -55,7 +55,8 @@ You get this once a week. If a week passes without it, the checks have stopped r
 
 The line about LINE messages is asked from LINE once a week: an official account may only send so
 many messages a month, and once they are used up nothing is delivered. From 80% on it becomes a
-warning, in time to raise the plan or make sure the fallback e-mail is set.
+warning, in time to raise the plan or make sure the fallback e-mail is set. When LINE is only a
+backup (your alerts normally go to Telegram or Discord) and was not needed that week, the line is left out.
 
 What to do when a message arrives is written up for owners, not programmers:
 **[When an alert arrives](skills/line-security-alerts/reference/when-an-alert-arrives.md)** (keep it on your phone).
@@ -115,9 +116,10 @@ Principles:
   messages a day (URGENT ones always go out); the first run only records a baseline.
 - **Never slows the site** — your code only appends a log line; LINE is called from a cron job
   every 5 minutes, not inside a visitor's request.
-- **Falls back to e-mail** when LINE refuses (e.g. the free plan's monthly quota is used up). If
-  neither can be reached, the alert is kept and sent as soon as delivery works again, marked with the
-  time it is really from — it does not end up in a log file on the server and nowhere else.
+- **One channel fails, the next one takes over**: when LINE refuses (e.g. the free plan's monthly
+  quota is used up) the message goes to Telegram, Discord or e-mail. If none can be reached, the alert
+  is kept and sent as soon as delivery works again, marked with the time it is really from — it does
+  not end up in a log file on the server and nowhere else.
 - **Files are compared every hour, and all of them are re-read in full once a week.** The hourly
   check only re-reads files whose size or times changed (cheap); the weekly one ignores size and
   times, so even "edited, same length, modification time put back" cannot stay hidden.
@@ -248,10 +250,66 @@ Where each hook goes and how to configure the file scan:
 
 Step by step, with an error-code table: [reference/line-setup.md](skills/line-security-alerts/reference/line-setup.md).
 
-**No LINE where you live?** The detection does not depend on LINE. Set `notifier` to a function that
-sends the text through your own channel (Telegram, Slack, Discord, SMS…): when it succeeds LINE is not
-used, when it fails the message falls back to LINE and e-mail. The shape is at the end of the config
-template; each service wants its own request format, so follow its documentation.
+## Telegram or Discord instead (or as well)
+
+LINE's free allowance is limited (about 200 messages a month on the free plan; plans differ by country)
+and more costs money. Telegram and Discord are built in as well, and both are free. Use one of them,
+or set up several so they back each other up.
+
+| | LINE | Telegram | Discord |
+|---|---|---|---|
+| Cost | Free plan about 200 messages a month, then a paid plan | Free | Free |
+| Setting up | Medium: official account, Messaging API, token and user ID | Easy: ask `@BotFather` for a token, then look up the chat id | Easy: create a webhook in the channel settings, copy its address |
+| Seen at once? | In Taiwan nearly everyone has LINE open all day | The app must be installed with notifications on | The app must be installed, and this channel's notifications set to "All messages" (many servers notify only on mentions by default) |
+| If the key leaks | Messages can be sent from your official account to everyone who added it, using up your allowance | Full control of the bot: send as it, receive what people send to it | Anything can be posted to that channel, and the webhook can be deleted (alerts then go to the next channel automatically) |
+
+Whatever you use, keep the key like the LINE token: environment variable, not version control, no screenshots.
+
+### Setting up Telegram
+
+1. In Telegram, find `@BotFather` (the official one, with the blue check), send `/newbot` and answer
+   its questions. You get a token like `123456789:AAH…`: that is `telegram_bot_token`.
+2. On your phone, open the new bot and tap Start. For a group: add the bot to the group and send
+   `/start` there.
+3. Open `https://api.telegram.org/bot<token>/getUpdates` in a browser (your token in place of `<token>`)
+   and find the number after `"chat":{"id":`: that is `telegram_chat_id` (negative for a group).
+   The address contains your token: do not share a screenshot of it.
+4. Run `php security-alerts-cron.php --test-all`. If your phone buzzes, you are done.
+
+### Setting up Discord
+
+1. In the channel that should get the alerts: Edit Channel (gear) → Integrations → Webhooks →
+   New Webhook → Copy Webhook URL. You need the "Manage Webhooks" permission.
+2. Put the address into `discord_webhook_url`.
+3. On your phone, long-press the channel → Notification settings → All messages.
+4. Run `php security-alerts-cron.php --test-all`.
+
+On Discord the message is shown in a grey code box. That keeps underscores and asterisks in file names
+from turning into formatting, and an account name containing `@everyone` or a fake link neither pings
+the whole server nor becomes something to click.
+
+### Several channels set up: where does a message go?
+
+To one place only. They are tried in the order **Telegram → Discord → LINE → e-mail**; the first one
+that takes the message stops the line, so nothing arrives twice. (A `notifier` of your own is tried
+before all of them.)
+
+To keep LINE's allowance for what really matters, add:
+
+```php
+'line_min_level' => 2,
+```
+
+With 2, **URGENT alerts go to LINE first** (and to the others if LINE refuses), while notices and the
+weekly check-in go to Telegram, Discord or e-mail. With 1, only the weekly check-in stays off LINE. If
+nothing but LINE is set up, LINE is still used (better than nowhere) and `--status` points it out.
+
+`--test-all` sends a test to every channel that is set up, each on its own, and says why one failed
+(for example "HTTP 401: Unauthorized" = wrong token). `--test` sends one message the way a notice
+would go and says which channel took it.
+
+**Other channels (Slack, SMS…):** set `notifier` to a function of your own. It is tried first; when it
+succeeds nothing else is used. The shape is at the end of the config template.
 
 ## Main settings
 
@@ -259,7 +317,10 @@ template; each service wants its own request format, so follow its documentation
 |---|---|---|
 | `state_dir` | (required) | Logs and fingerprints; ideally outside the web root |
 | `line_channel_access_token`, `line_to` | | LINE token and recipients (environment variables, not version control) |
-| `mail_to` | | E-mail fallback |
+| `telegram_bot_token`, `telegram_chat_id` | | Telegram bot token and chat (optional); token in an environment variable |
+| `discord_webhook_url` | | Discord channel webhook address (optional); the address itself is the key |
+| `line_min_level` | 0 | Which messages may use LINE: 0 = all; 1 = not the weekly check-in; 2 = URGENT only (tried on LINE first) |
+| `mail_to` | | E-mail, when every other channel fails |
 | `language` | `en` | `en` or `zh-TW` |
 | `site_root`, `exclude_dirs`, `upload_dirs`, `runtime_dirs` | | File-scan scope; exclude cache folders |
 | `scan_hours` | 1 | Hours between file checks; 0 = on every run (every 5 minutes). Only files whose size or times changed are re-read |
@@ -272,7 +333,7 @@ template; each service wants its own request format, so follow its documentation
 | `line_quota_check` | on | With the weekly check-in, ask LINE how many messages were sent this month and what the limit is |
 | `witness_file` | | A small file OUTSIDE the state folder; reveals a wiped state folder |
 | `ping_url` | | Address from an outside "cron check-in" service (optional). Keep it like a password: environment variable |
-| `notifier` | | Your own channel (optional); LINE is used when it is not set |
+| `notifier` | | A channel of your own (optional, e.g. Slack, SMS); tried first |
 | `login_fail_hour` / `login_fail_ip_hour` | 10 / 5 | Failed logins per hour before an alert |
 | `firewall_hour` / `firewall_ip_hour` | 50 / 20 | Blocked requests per hour before an alert |
 | `refund_*`, `cancel_*`, `adjust_*` | counts 3–5, amounts 0 (off) | Set amounts for your currency |
@@ -285,10 +346,10 @@ The full list is `SecurityAlerts::defaults()`. Thresholds are starting points �
 php skills/line-security-alerts/scripts/selftest.php
 ```
 
-170 scenario checks (logins, devices, accounts, firewall, money, files, web-shell patterns, weekly
+204 scenario checks (logins, devices, accounts, firewall, money, files, web-shell patterns, weekly
 check-in and fingerprint, wiped or edited records, upgrading old fingerprints, outside check-in,
-quarantine, timestamps put back, delayed delivery, non-UTF-8 names, daily cap, e-mail fallback…), no
-network. On every change GitHub runs them again on Linux (PHP 7.4–8.5)
+quarantine, timestamps put back, delayed delivery, non-UTF-8 names, daily cap, e-mail fallback,
+Telegram / Discord order, long messages in parts, "too many requests"…), no network. On every change GitHub runs them again on Linux (PHP 7.4–8.5)
 and Windows.
 
 > **⚠️ Your antivirus may raise a warning — that is expected**
@@ -315,12 +376,15 @@ php -S 127.0.0.1:18765 skills/line-security-alerts/scripts/fake_line_server.php
 
 and set `'line_api_base' => 'http://127.0.0.1:18765'`; messages are printed in that terminal. The same
 fake server also plays the outside check-in service (`'ping_url' => 'http://127.0.0.1:18765/ping/test'`),
-so you can try that without signing up anywhere.
+so you can try that without signing up anywhere. It plays Telegram and Discord too, including
+"too many requests", server errors and slow answers (see the top of `scripts/fake_line_server.php`).
 
 ## Security and privacy
 
 - Keep the token in environment variables or a config file outside the web root and out of version
   control. The same goes for the check-in address (`ping_url`): whoever has it can check in for you.
+  The Telegram token becomes part of the address a message is sent to, and a Discord webhook address
+  is itself the key, so these addresses are never written to a record, an error or `--status`.
 - File fingerprints are SHA-256. The admin snapshot stores only SHA-256 fingerprints of e-mail,
   password hash and permissions, never the values.
 - Messages carry summaries only (account names, IPs, file names, amounts) — no passwords, no customer data.

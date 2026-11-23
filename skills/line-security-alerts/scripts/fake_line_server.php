@@ -17,6 +17,17 @@
  *
  * And a generic incoming webhook, for trying a `notifier` of your own:
  *   POST http://127.0.0.1:8765/hook/anything   with a JSON body; prints its "text" field (or the raw body)
+ *
+ * Telegram and Discord, too:
+ *   'telegram_api_base'   => 'http://127.0.0.1:8765',  'telegram_bot_token' => '123:TEST',  'telegram_chat_id' => '42'
+ *   'discord_webhook_url' => 'http://127.0.0.1:8765/api/webhooks/1/ok'
+ * The chat id (Telegram) or the last part of the webhook address (Discord) picks how it answers:
+ *   anything else   accepted                    500    a server error
+ *   429-once        "too many requests, wait 1 second" the first time, then accepted
+ *   429-long        "too many requests, wait 30 seconds", every time
+ *   slow            answers after 12 seconds (longer than the module waits)
+ *   gone            Telegram: chat not found (400); Discord: unknown webhook (404)
+ * Like the real ones it refuses a message longer than 4096 (Telegram) or 2000 (Discord) characters.
  */
 
 $inbox = rtrim(str_replace('\\', '/', sys_get_temp_dir()), '/') . '/fake-line-inbox.ndjson';
@@ -58,6 +69,96 @@ if (strpos((string) $path, '/hook/') === 0 && $_SERVER['REQUEST_METHOD'] === 'PO
     file_put_contents($inbox, json_encode(array('t' => time(), 'hook' => $shown), JSON_UNESCAPED_UNICODE) . "\n", FILE_APPEND | LOCK_EX);
     file_put_contents('php://stderr', "\n----- webhook received -----\n" . $shown . "\n");
     return reply(200, array('ok' => true));
+}
+/** Telegram and Discord count in UTF-16 code units: an emoji is two. */
+function units16($s)
+{
+    return (int) preg_match_all('/./us', $s) + (int) preg_match_all('/[\x{10000}-\x{10FFFF}]/u', $s);
+}
+
+/** How the fake answers, picked by $mode. Returns null = go ahead and accept. */
+function trouble($mode, $service)
+{
+    if ($mode === 'slow')
+    {
+        sleep(12);
+    }
+    if ($mode === '500')
+    {
+        return reply(500, $service === 'telegram' ? array('ok' => false, 'error_code' => 500, 'description' => 'Internal Server Error') : array('message' => '500: Internal Server Error', 'code' => 0));
+    }
+    $flag = rtrim(str_replace('\\', '/', sys_get_temp_dir()), '/') . '/fake-line-429-' . $service . '.flag';
+    if ($mode === '429-long' || ($mode === '429-once' && !is_file($flag)))
+    {
+        if ($mode === '429-once')
+        {
+            touch($flag);
+        }
+        $wait = $mode === '429-long' ? 30 : 1;
+        return reply(429, $service === 'telegram'
+            ? array('ok' => false, 'error_code' => 429, 'description' => 'Too Many Requests: retry after ' . $wait, 'parameters' => array('retry_after' => $wait))
+            : array('message' => 'You are being rate limited.', 'retry_after' => $mode === '429-long' ? 30.0 : 0.6, 'global' => false));
+    }
+    if ($mode === '429-once')
+    {
+        @unlink($flag);   // the second try goes through
+    }
+    if ($mode === 'gone')
+    {
+        return $service === 'telegram'
+            ? reply(400, array('ok' => false, 'error_code' => 400, 'description' => 'Bad Request: chat not found'))
+            : reply(404, array('message' => 'Unknown Webhook', 'code' => 10015));
+    }
+    return null;
+}
+
+if (preg_match('#^/bot([^/]+)/sendMessage$#', (string) $path, $m) && $_SERVER['REQUEST_METHOD'] === 'POST')
+{
+    if (!preg_match('/^[0-9]+:[A-Za-z0-9_-]+$/', $m[1]))
+    {
+        return reply(401, array('ok' => false, 'error_code' => 401, 'description' => 'Unauthorized'));
+    }
+    $req = json_decode((string) file_get_contents('php://input'), true);
+    if (!is_array($req) || !isset($req['chat_id'], $req['text']) || $req['text'] === '')
+    {
+        return reply(400, array('ok' => false, 'error_code' => 400, 'description' => 'Bad Request: message text is empty'));
+    }
+    if (($r = trouble((string) $req['chat_id'], 'telegram')) !== null)
+    {
+        return $r;
+    }
+    $text = (string) $req['text'];
+    if (units16($text) > 4096)
+    {
+        return reply(400, array('ok' => false, 'error_code' => 400, 'description' => 'Bad Request: message is too long'));
+    }
+    $notes = array_keys(array_intersect_key($req, array('parse_mode' => 1, 'link_preview_options' => 1, 'disable_web_page_preview' => 1)));
+    file_put_contents($inbox, json_encode(array('t' => time(), 'telegram' => (string) $req['chat_id'], 'text' => $text, 'options' => $notes), JSON_UNESCAPED_UNICODE) . "\n", FILE_APPEND | LOCK_EX);
+    file_put_contents('php://stderr', "\n----- Telegram message to chat " . $req['chat_id'] . " -----\n" . $text . "\n");
+    return reply(200, array('ok' => true, 'result' => array('message_id' => mt_rand(1, 99999))));
+}
+if (preg_match('#^/api/webhooks/([0-9]+)/([^/?]+)$#', (string) $path, $m) && $_SERVER['REQUEST_METHOD'] === 'POST')
+{
+    $req = json_decode((string) file_get_contents('php://input'), true);
+    if (!is_array($req) || !isset($req['content']) || $req['content'] === '')
+    {
+        return reply(400, array('message' => 'Cannot send an empty message', 'code' => 50006));
+    }
+    if (($r = trouble($m[2], 'discord')) !== null)
+    {
+        return $r;
+    }
+    $text = (string) $req['content'];
+    if (units16($text) > 2000)
+    {
+        return reply(400, array('message' => 'Invalid Form Body', 'code' => 50035, 'errors' => array('content' => array('_errors' => array(array('code' => 'BASE_TYPE_MAX_LENGTH', 'message' => 'Must be 2000 or fewer in length.'))))));
+    }
+    $quiet = isset($req['allowed_mentions']['parse']) && $req['allowed_mentions']['parse'] === array();
+    file_put_contents($inbox, json_encode(array('t' => time(), 'discord' => $m[1], 'text' => $text, 'mentions_off' => $quiet,
+        'flags' => isset($req['flags']) ? (int) $req['flags'] : 0), JSON_UNESCAPED_UNICODE) . "\n", FILE_APPEND | LOCK_EX);
+    file_put_contents('php://stderr', "\n----- Discord message (webhook " . $m[1] . ($quiet ? '' : ', WARNING: mentions not switched off') . ") -----\n" . $text . "\n");
+    http_response_code(204);   // what Discord answers when the caller does not ask to wait for the message
+    return true;
 }
 if ($path !== '/v2/bot/message/push' || $_SERVER['REQUEST_METHOD'] !== 'POST')
 {

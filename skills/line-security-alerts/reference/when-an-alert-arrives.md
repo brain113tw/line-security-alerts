@@ -141,15 +141,15 @@ files were converted quietly.
 
 ## A message that starts with "⏱ Delayed: this alert is from …"
 
-**Meaning**: this is about something that happened earlier. At that moment neither LINE nor e-mail
-could be reached (LINE down, monthly quota used up and no e-mail set…), so the alert was kept and is
-delivered now.
+**Meaning**: this is about something that happened earlier. At that moment no channel could be
+reached (LINE down or its monthly quota used up, no Telegram, Discord or e-mail set…), so the alert was
+kept and is delivered now.
 
 **Do**
 
 - Look at the original time in the message and handle the alert as usual: it happened then, not now.
 - If delayed alerts keep coming, the channel is unreliable: have your developer check the LINE
-  monthly quota and make sure a fallback e-mail address is set.
+  monthly quota and make sure a second channel is set (e-mail, Telegram or Discord).
 
 ## Weekly check-in
 
@@ -187,7 +187,8 @@ to customers included.
 - No ⚠: nothing to do.
 - **⚠ "about N of M" or "used up"**: once the limit is reached LINE delivers nothing, security alerts
   included. Do one or both: raise the plan in the LINE Official Account Manager; have your developer
-  make sure a fallback e-mail address is set (then alerts go by e-mail when LINE refuses).
+  make sure a second channel is set (e-mail, Telegram or Discord: alerts go there when LINE refuses).
+  Telegram and Discord are free; with `line_min_level => 2` LINE is kept for urgent alerts only.
 
 ### An extra line: "⚠ The outside check-in address has failed…"
 

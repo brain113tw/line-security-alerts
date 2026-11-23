@@ -6,7 +6,9 @@
 //   php security-alerts-cron.php               run every check now
 //   php security-alerts-cron.php --status      where things stand: last run, files watched, what was reported,
 //                                              anything waiting, anything that needs a look (sends nothing)
-//   php security-alerts-cron.php --test        send one test message
+//   php security-alerts-cron.php --test        send one test message (it goes where a notice would go)
+//   php security-alerts-cron.php --test-all    send the test message to EVERY channel that is set up, each on
+//                                              its own, and say which one failed and why (for setting up)
 //   php security-alerts-cron.php --rebaseline  forget file fingerprints (after a big deployment you trust)
 //   php security-alerts-cron.php --audit       read every code file and list the ones that look suspicious
 //                                              (once after installing: the first run trusts what is already there)
@@ -36,16 +38,22 @@ if ($arg === '--status')
         $m = (int) round(($s['now'] - $t) / 60);
         return ' (' . ($m < 120 ? $m . ' min ago' : ($m < 2880 ? round($m / 60) . ' h ago' : round($m / 1440) . ' days ago')) . ')';
     };
-    $to = array();
-    if ($s['delivery']['notifier']) { $to[] = 'your own notifier'; }
-    if ($s['delivery']['line']) { $to[] = 'LINE (' . $s['delivery']['line_recipients'] . ' recipient' . ($s['delivery']['line_recipients'] === 1 ? '' : 's') . ')'; }
-    $to[] = 'e-mail fallback: ' . ($s['delivery']['mail'] ? 'set' : 'not set');
+    $d = $s['delivery'];
+    $n = function ($k, $word) { return $k . ' ' . $word . ($k === 1 ? '' : 's'); };
+    $label = array('custom' => 'your own notifier', 'telegram' => 'Telegram (' . $n($d['telegram_chats'], 'chat') . ')',
+        'discord' => 'Discord (' . $n($d['discord_webhooks'], 'webhook') . ')', 'line' => 'LINE (' . $n($d['line_recipients'], 'recipient') . ')', 'mail' => 'e-mail');
+    $path = function (array $route) use ($label) {
+        return $route ? implode(', then ', array_map(function ($c) use ($label) { return $label[$c]; }, $route)) : 'nowhere';
+    };
     $ping = !$s['outside_checkin']['configured'] ? 'not set'
         : ($s['outside_checkin']['failing'] > 0 ? 'FAILING ' . $s['outside_checkin']['failing'] . ' time(s) in a row since ' . $at($s['outside_checkin']['failing_since']) : 'working');
     echo 'Status of "' . $s['site_name'] . '" at ' . $at($s['now']) . "\n";
     echo '  checks            : ' . ($s['enabled'] ? 'on' : 'OFF') . ', last run ' . $at($s['last_run']) . $ago($s['last_run']) . "\n";
     echo '  records go back to: ' . ($s['installed_at'] ? date('Y-m-d', $s['installed_at']) : '-') . "\n";
-    echo '  alerts go to      : ' . implode(', ', $to) . "\n";
+    /* the first channel that takes a message stops the line */
+    echo '  alerts go to      : ' . $path($d['route']['notice']) . ($d['mail'] ? '' : '  (no e-mail fallback)') . "\n";
+    if ($d['route']['urgent'] !== $d['route']['notice']) { echo '  urgent ones       : ' . $path($d['route']['urgent']) . '  (line_min_level ' . $d['line_min_level'] . ")\n"; }
+    if ($d['route']['checkin'] !== $d['route']['notice']) { echo '  check-in goes to  : ' . $path($d['route']['checkin']) . "\n"; }
     echo '  sent today        : ' . $s['sent_today'] . ' of ' . $s['daily_cap'] . " (urgent ones are not limited)\n";
     echo '  waiting to re-send: ' . $s['waiting']['count'] . ($s['waiting']['count'] ? ', oldest from ' . $at($s['waiting']['oldest']) : '') . "\n";
     if ($s['files']['scan'])
@@ -76,8 +84,19 @@ if ($arg === '--status')
 if ($arg === '--test')
 {
     $r = $alerts->sendTest();
-    echo date('Y-m-d H:i:s') . " test message: $r\n";
+    echo date('Y-m-d H:i:s') . ' test message: ' . ($r === 'failed' ? 'FAILED on every channel (try --test-all to see why)' : 'sent via ' . $r) . "\n";
     exit($r === 'failed' ? 1 : 0);
+}
+if ($arg === '--test-all')
+{
+    $all = $alerts->testEachChannel();
+    foreach ($all as $ch => $res)
+    {
+        echo '  ' . str_pad($ch === 'custom' ? 'notifier' : $ch, 9) . ($res['ok'] ? 'sent' : 'FAILED: ' . $res['why']) . "\n";
+    }
+    if (!$all) { echo "  no channel is set up\n"; }
+    $bad = count(array_filter($all, function ($res) { return !$res['ok']; }));
+    exit(!$all || $bad ? 1 : 0);
 }
 if ($arg === '--rebaseline')
 {

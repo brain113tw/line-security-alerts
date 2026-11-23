@@ -1,6 +1,6 @@
 ---
 name: line-security-alerts
-description: Add "something looks wrong" security alerts to a PHP website, pushed to the owner's LINE (with e-mail fallback). Covers failed or new-device admin logins, admin account changes, new/changed code files and web shells, firewall blocks, and unusual refunds or balance adjustments. Stays silent when nothing is wrong. Use when someone wants intrusion alerts, file-integrity monitoring or admin-login alerts on LINE for a small PHP site, shop or CMS.
+description: Add "something looks wrong" security alerts to a PHP website, pushed to the owner's LINE (Telegram and Discord built in too, with e-mail fallback). Covers failed or new-device admin logins, admin account changes, new/changed code files and web shells, firewall blocks, and unusual refunds or balance adjustments. Stays silent when nothing is wrong. Use when someone wants intrusion alerts, file-integrity monitoring or admin-login alerts on LINE for a small PHP site, shop or CMS.
 license: MIT
 ---
 
@@ -14,7 +14,8 @@ How it works, in one paragraph: the site calls tiny hooks (`loginFailed()`, `fir
 that only append a line to a log file. Every 5 minutes a cron job (or `tick()` on normal page
 views) reads those logs, walks the code files, decides what is abnormal and sends **one** combined
 LINE message. The same finding is not repeated for 6 hours, at most `daily_cap` messages go out a
-day (URGENT ones always go out), and if LINE refuses, the message goes by e-mail. The first run
+day (URGENT ones always go out), and if LINE refuses, the message goes to the next channel (Telegram,
+Discord, e-mail — whichever are set up). The first run
 learns a baseline and sends nothing. Because silence could also mean "broken", it sends one "still
 on duty" message a week, and it raises an alert if its own records are wiped or reset. That weekly
 message carries one fingerprint of all code files, so the owner's chat history is a reference copy
@@ -27,7 +28,7 @@ Read these when you need them:
 - [reference/when-an-alert-arrives.md](reference/when-an-alert-arrives.md) / [繁體中文](reference/when-an-alert-arrives.zh-TW.md) — the owner's checklist: what each message means and what to do first
 - [reference/hardening-checklist.md](reference/hardening-checklist.md) / [繁體中文](reference/hardening-checklist.zh-TW.md) — the prevention side: what makes a break-in less likely in the first place
 - [reference/line-setup.md](reference/line-setup.md) — getting a channel access token and the user/group ID
-- [examples/](examples/) — a config template and the cron entry point (`--status`, `--test`, `--audit`, `--fingerprint`, `--manifest`, `--rebaseline`)
+- [examples/](examples/) — a config template and the cron entry point (`--status`, `--test`, `--test-all`, `--audit`, `--fingerprint`, `--manifest`, `--rebaseline`)
 - `scripts/selftest.php` — 170 checks, no network; `scripts/fake_line_server.php` — a local stand-in for LINE, for the check-in service and for a webhook
 - `scripts/fingerprint.php` — the code fingerprint of any folder, to compare a clean local copy with the one the server reports
 - `scripts/demo.php` — replays a few days at a small shop and prints the exact messages the owner
@@ -57,7 +58,12 @@ Find and note, with file paths:
 7. **Scheduling**: can they add a cron job (hosting panel "Cron Jobs", `crontab -e`)? If not,
    plan to use `tick()` on page views.
 8. **Secrets handling**: does the project already keep secrets in environment variables or in a
-   config file outside version control? Use the same place for the LINE token.
+   config file outside version control? Use the same place for the LINE token (and the Telegram
+   token or Discord webhook address, if the user wants one of those).
+10. **Channel**: LINE, Telegram, Discord, or several? Show the user the comparison in the README
+   (cost, setup, whether they will see it at once, what a leaked key allows). For a Taiwanese shop
+   owner LINE is usually the one they see first; Telegram or Discord can carry the routine messages
+   with `line_min_level => 2`. Let them create the bot or webhook themselves.
 9. **Outside monitoring**: does the user already use a cron-monitoring / uptime service? If so, its
    check-in address can go into `ping_url`. If not, mention the option and let the user decide and
    sign up themselves.
@@ -124,11 +130,14 @@ Preferred: cron every 5 minutes running `examples/security-alerts-cron.php` (adj
    the bait working, not an infection, and nothing is installed. Do not run the self-test without
    saying this first — an unexplained antivirus alert looks exactly like you planting malware.
 2. Start `php -S 127.0.0.1:18765 scripts/fake_line_server.php`, set `line_api_base` to it, run
-   `php security-alerts-cron.php --test`, then trigger one finding on a **staging or local copy**
+   `php security-alerts-cron.php --test` (with Telegram or Discord also `telegram_api_base` /
+   a webhook address on the fake server, see the top of that file, and `--test-all`), then trigger
+   one finding on a **staging or local copy**
    (e.g. several wrong passwords) and run the cron script; read what the fake server printed.
    Stop the fake server afterwards (by its PID).
-3. Remove `line_api_base`, put the real token in, run `--test` once and ask the user to confirm the
-   message arrived on their phone.
+3. Remove `line_api_base` (and the fake Telegram / Discord addresses), put the real keys in, run
+   `--test-all` once and ask the user to confirm that every channel arrived on their phone. A failing
+   channel prints the service's reason (e.g. "HTTP 400: Bad Request: chat not found").
 4. Run the cron script once more: the first real run records the baseline and must send nothing.
 5. **Look at what was already there.** The baseline trusts the server as it is; a backdoor planted
    before the install would become "normal". Run `php security-alerts-cron.php --audit` and go
@@ -143,8 +152,8 @@ Preferred: cron every 5 minutes running `examples/security-alerts-cron.php` (adj
    carry and whether the files on disk still match the records.
 8. `php security-alerts-cron.php --status` must end with "nothing needs a look" (or only with lines
    you have explained to the user, such as a missing fallback e-mail). Use the same command first
-   whenever the user later asks whether the alerts still work; it never prints the token, the
-   recipients or the check-in address.
+   whenever the user later asks whether the alerts still work; it never prints a token, a recipient
+   or chat id, a webhook or the check-in address. It shows the order the channels are tried in.
 
 ### 6. Hand-over to the user
 
@@ -175,8 +184,9 @@ Tell the user, in their language:
 
 ## Rules for you (the agent)
 
-- Never print, log or commit the channel access token, user IDs, the check-in address (`ping_url`),
-  or the contents of config files that hold them. Ask the user to paste them into the config
+- Never print, log or commit the channel access token, user IDs, the Telegram bot token or chat id,
+  the Discord webhook address, the check-in address (`ping_url`), or the contents of config files that
+  hold them. A `getUpdates` page or a webhook address in a screenshot is a leaked key. Ask the user to paste them into the config
   themselves if needed.
 - Do not sign the user up for outside services (cron monitoring, chat webhooks) and do not choose
   one for them silently; explain the option, they create the account.
@@ -195,6 +205,7 @@ Tell the user, in their language:
   root, and always delete them. Copy only `lib/SecurityAlerts.php` (plus the config and cron entry)
   to the site — `scripts/` stays out of the web root.
 - Do not send real LINE messages without the user's OK; each push counts against their monthly quota.
+  The same goes for Telegram and Discord: a test lands in a real chat or channel.
 - Adding hooks must not change behaviour: same responses, same redirects, same timing for the user.
 - Keep the module's defaults unless the user asks; explain any threshold you change and why.
 - If the site already has an alerting system, integrate with it (feed its events in with `custom()`,
