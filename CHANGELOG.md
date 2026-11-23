@@ -1,5 +1,14 @@
 # Changelog / 更新紀錄
 
+## 1.1.1 — 2026-11-23
+
+- New: a prevention checklist ([English](skills/line-security-alerts/reference/hardening-checklist.md),
+  [繁體中文](skills/line-security-alerts/reference/hardening-checklist.zh-TW.md)) — upload folders that
+  cannot run programs, an extra door in front of the admin area (identity check at a CDN, or the host's
+  folder password), what to mind when a CDN sits in front (real visitor IP, locking the origin), SSH
+  on your own server. Several items were suggested by readers. Documentation only; no code change.
+  新增「預防清單」，整理網友回饋的預防做法。只加文件，程式沒有變。
+
 ## 1.1.0 — 2026-11-23
 
 - **LINE allowance in the weekly check-in.** Once a week the module asks LINE how many messages the

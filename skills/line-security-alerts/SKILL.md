@@ -25,6 +25,7 @@ Read these when you need them:
 
 - [reference/integration.md](reference/integration.md) — where each hook goes, with plain-PHP examples; how the monitor watches itself; the outside check-in; comparing the code fingerprint; `--audit` and custom rules; the optional quarantine of uploaded programs; using another channel than LINE
 - [reference/when-an-alert-arrives.md](reference/when-an-alert-arrives.md) / [繁體中文](reference/when-an-alert-arrives.zh-TW.md) — the owner's checklist: what each message means and what to do first
+- [reference/hardening-checklist.md](reference/hardening-checklist.md) / [繁體中文](reference/hardening-checklist.zh-TW.md) — the prevention side: what makes a break-in less likely in the first place
 - [reference/line-setup.md](reference/line-setup.md) — getting a channel access token and the user/group ID
 - [examples/](examples/) — a config template and the cron entry point (`--status`, `--test`, `--audit`, `--fingerprint`, `--manifest`, `--rebaseline`)
 - `scripts/selftest.php` — 170 checks, no network; `scripts/fake_line_server.php` — a local stand-in for LINE, for the check-in service and for a webhook
@@ -165,6 +166,9 @@ Tell the user, in their language:
   the time in it is when the thing happened;
 - where the logs are (`state_dir/findings.ndjson` keeps every finding, sent or not), and that
   `--status` summarises them;
+- the prevention checklist in their language. Point out the items your survey showed are missing
+  (for example an upload folder that can run programs), but do not change server settings, add
+  password protection or touch DNS on your own: describe the step and let them decide;
 - that the weekly message also says how much of the month's LINE allowance is used, and that a ⚠ on
   that line means: raise the LINE plan or make sure the fallback e-mail is set;
 - that thresholds are starting points to tune after a week of real traffic.

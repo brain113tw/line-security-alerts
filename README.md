@@ -146,6 +146,9 @@ php skills/line-security-alerts/scripts/demo.php --lang=zh-TW --site="我的商�
 
 本套件用的是 **LINE Messaging API**。以前很多人用的 LINE Notify 已經在 2025 年 3 月 31 日結束服務。
 
+這個套件負責「出事了讓你知道」。還沒出事之前可以先做的事（上傳資料夾不能執行程式、後台外面再加一道門…），
+整理在 **[預防清單](skills/line-security-alerts/reference/hardening-checklist.zh-TW.md)**，其中幾項是網友回饋補充的。
+
 ## 安裝
 
 ### 方式 A：在 Claude Code 裡讓 Claude 幫你裝（推薦）

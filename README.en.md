@@ -172,6 +172,11 @@ an owner who reads LINE all day**. Other tools do some things better, and they c
 It uses the **LINE Messaging API**. LINE Notify, which many older guides rely on, was shut down on
 31 March 2025.
 
+This package covers "tell me when it happened". What to do beforehand — upload folders that cannot
+run programs, one more door in front of the admin area… — is collected in the
+**[prevention checklist](skills/line-security-alerts/reference/hardening-checklist.md)**; several
+items came from readers.
+
 ## Install
 
 ### A. Let Claude Code wire it in (recommended)
