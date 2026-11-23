@@ -26,6 +26,9 @@ repository. For example, a way to:
 - hide tampering with its own records from the weekly check-in;
 - get the LINE token, the recipient ids or the check-in address written to a log or a message;
 - make the optional quarantine rename anything other than a new program file inside an upload folder;
+- forge, reuse or extend an emergency-brake link, or make the brake page unlock or change anything;
+- make the page watch read anything other than the configured pages, or hide an injected script from it;
+- open an `--expect` window that hides a backdoor-like change or lasts longer than 4 hours;
 - break or slow down the host site through the hooks.
 
 Out of scope:
@@ -39,6 +42,14 @@ Out of scope:
 ## Supported versions
 
 The latest release. Please update before reporting.
+
+## Checking what you installed
+
+- Releases are git tags (`v1.3.0`…). Install a tag rather than the default branch:
+  `/plugin marketplace add brain113tw/line-security-alerts#v1.3.0`.
+- From 1.3.0 on, each release on the Releases page lists the SHA-256 of `lib/SecurityAlerts.php`.
+  Compare it with your copy (`sha256sum lib/SecurityAlerts.php`).
+- The automated tests pin every GitHub Action to a full commit and run with read-only permissions.
 
 ---
 
@@ -56,3 +67,6 @@ The latest release. Please update before reporting.
 這個專案是一家小店在維護，不是資安團隊，回覆可能要幾天。修正發布時會註明回報的人，除非你不想具名。
 
 README 裡講明的限制不算漏洞：跟網站有同樣檔案權限的人，可以改掉偵測本身；每週總指紋和外部報到是讓這件事「看得出來」，不是讓它「做不到」。
+
+**確認裝到的是哪一版**：請安裝版本標籤（`/plugin marketplace add brain113tw/line-security-alerts#v1.3.0`），不要直接裝最新的主分支。
+從 1.3.0 起，Releases 頁每一版都附上 `lib/SecurityAlerts.php` 的 SHA-256，可以跟你手上的檔案比對。

@@ -19,6 +19,8 @@
 //                                              in ONE message afterwards. Backdoor-like content, programs in upload
 //                                              folders and hidden edits are still reported at once.
 //   php security-alerts-cron.php --expect off  the update is done: close the window now and send the summary
+//   php security-alerts-cron.php --lock 4h     lock the admin area now (the emergency brake, from the server)
+//   php security-alerts-cron.php --unlock      end the emergency lock early
 //   php security-alerts-cron.php --pages       read the pages in page_watch now, the four ways, and list the other
 //                                              sites each one uses; marks what only search engines / visitors from
 //                                              Google get (once after setting it up: the first check trusts what is there)
@@ -82,6 +84,8 @@ if ($arg === '--status')
         echo '  update window     : ' . ($s['expect']['open'] ? 'OPEN until ' . date('H:i', $s['expect']['until']) : 'ended ' . date('H:i', $s['expect']['until']) . ', summary goes with the next run')
             . '; so far ' . $s['expect']['new'] . ' new, ' . $s['expect']['changed'] . ' changed, ' . $s['expect']['deleted'] . " deleted\n";
     }
+    echo '  emergency brake   : ' . ($s['brake']['locked_until'] !== null ? 'ADMIN AREA LOCKED until ' . $at($s['brake']['locked_until'])
+        : ($s['brake']['ready'] ? 'ready (a link in every urgent alert)' : 'not set up')) . "\n";
     $pg = $s['pages'];
     echo '  pages watched     : ' . ($pg['watched'] ? $pg['watched'] . ', last read ' . $at($pg['last_check']) : 'none (page_watch)') . "\n";
     echo '  weekly check-in   : ' . ($s['checkin']['every_days'] > 0 ? 'next one due ' . $at($s['checkin']['next_due']) : 'off')
@@ -153,6 +157,28 @@ if ($arg === '--expect')
         . ' until ' . date('H:i', $r['until']) . ".\n"
         . "  Ordinary code-file changes until then come as ONE summary afterwards. Backdoor-like content, programs in\n"
         . "  upload folders and hidden edits are still reported at once. Done early? --expect off\n";
+    exit(0);
+}
+if ($arg === '--lock')
+{
+    $v = isset($argv[2]) ? strtolower($argv[2]) : '';
+    $hours = null;
+    if ($v !== '')
+    {
+        if (!preg_match('/^(\d+)(m|min|h)?$/', $v, $m))
+        {
+            echo "usage: --lock 4h | 90m   (at most 72 hours)\n";
+            exit(2);
+        }
+        $hours = (int) $m[1] / (isset($m[2]) && $m[2] === 'h' ? 1 : 60);
+    }
+    $until = $alerts->lockAdmin($hours, 'command');
+    echo date('Y-m-d H:i:s') . ' admin area locked until ' . date('Y-m-d H:i', $until) . " (only where the admin area asks adminLocked()). --unlock ends it.\n";
+    exit(0);
+}
+if ($arg === '--unlock')
+{
+    echo date('Y-m-d H:i:s') . ' ' . ($alerts->unlockAdmin() ? 'admin area unlocked' : 'the admin area was not locked') . "\n";
     exit(0);
 }
 if ($arg === '--pages')

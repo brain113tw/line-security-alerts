@@ -20,9 +20,13 @@ jobs:
           - os: windows-latest
             php: '8.4'
     steps:
-      - uses: actions/checkout@v7
+      # Actions are pinned to a full commit, not a tag: a tag can be moved to other code by whoever
+      # controls that repository; a commit cannot. The comment says which release it is.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1   # v7.0.1
+        with:
+          persist-credentials: false
 
-      - uses: shivammathur/setup-php@v2
+      - uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962   # 2.40.0
         with:
           php-version: ${{ matrix.php }}
           extensions: curl, mbstring

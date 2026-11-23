@@ -178,6 +178,26 @@ visitors away from it.
 **Do**: did you or your staff add an article, a partner, a social link? Then ignore it. If nobody did,
 look at that page with your developer: links can be slipped in the same way as the hidden ones above.
 
+## The last line "🛑 Not your doing, and nobody to call? Lock the admin area…"
+
+(Only if your developer set up the emergency brake.)
+
+**When to use it**: the alert above it is URGENT, it is not something you or your staff did, and you
+cannot reach your developer. Tap the link and press the button on the page. The admin area is then
+locked for a few hours — nobody can use it, including whoever broke in and your own staff — while
+customers keep shopping. Opening the link alone does nothing; only the button locks.
+
+Then keep trying to reach your developer. Only they can unlock it early (on the server). If you are
+unsure, pressing is the safe side: the worst outcome is a few hours without the admin area.
+
+## 【URGENT】 The admin area is locked
+
+**Meaning**: someone pressed the emergency brake (the message says when, and from which IP), or your
+developer locked the admin area from the server.
+
+**Do**: if it was you, nothing more — wait for your developer. **If nobody on your side pressed it**,
+someone can read your alert messages or is on the server: tell your developer today.
+
 ## 【Notice】 Code changes during your announced update
 
 **Meaning**: before uploading an update, your developer ran `--expect`. During that time the code

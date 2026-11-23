@@ -92,6 +92,31 @@ request really came from that layer and checks the file again. That is one more 
 one. "It looks like an image" does not stop a program hidden behind a real image — rule 1 is still
 the real protection.
 
+## 5. A trap: a decoy key (about 10 minutes, free)
+
+Every check in this package looks at what an intruder *changes*. None of them sees an intruder who
+only *reads* — goes through your files looking for passwords and keys. A decoy catches exactly that.
+
+1. On [canarytokens.org](https://canarytokens.org) (free; the code is at github.com/thinkst/canarytokens),
+   pick **"AWS Keys"**, give it the e-mail address that should be warned and a memo such as
+   "shop server, home folder". It gives you a fake access key and secret.
+2. Put them where someone looking for secrets would look, but where nobody legitimate ever reads:
+   for example a file `.aws/credentials` in the hosting account's home folder, or a line such as
+   `# old backup key: AKIA… / …` next to the real settings. **Never inside the public web folder**
+   (anyone on the internet could trigger it) and never in a place your own scripts use.
+3. Done. Nobody has a reason to use that key. If anyone ever tries it, the service e-mails you
+   (it goes through Amazon's logs first, so allow 2 to 30 minutes): someone has been reading your
+   server's files.
+
+The key is fake and opens nothing. The only thing it tells the service is your note and the
+address you gave it.
+
+## 6. Something tells you when Google thinks the site was hacked
+
+Add the site to Google Search Console (free) and let it e-mail the owner. Its "Security issues"
+report sees what Google's real crawler gets, which a check from inside your server cannot fully copy:
+some spam injections only show themselves to Google's own addresses.
+
 ## What this list does not replace
 
 Detection. Every item above lowers the odds; none of them is a guarantee. Something still has to

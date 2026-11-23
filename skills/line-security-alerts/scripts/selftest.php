@@ -1779,11 +1779,89 @@ if (PHP_VERSION_ID < 80100) { $tm->setAccessible(true); }
 $missing = array();
 foreach (array('hb_friends', 'exp_title', 'exp_opened', 'exp_window', 'exp_none', 'exp_hint', 'page_home', 'page_code_title', 'page_new_script',
     'page_new_frame', 'page_new_form', 'page_new_redirect', 'page_code_hint', 'page_hidden_title', 'page_hidden_line', 'page_who_c', 'page_who_g',
-    'page_who_cg', 'page_hidden_hint', 'page_links_title', 'page_links_hint', 'page_more', 'page_and_more', 'page_data_url', 'page_lost_title', 'page_lost_body') as $key)
+    'page_who_cg', 'page_hidden_hint', 'page_links_title', 'page_links_hint', 'page_more', 'page_and_more', 'page_data_url', 'page_lost_title', 'page_lost_body',
+    'brake_line', 'brake_title', 'brake_confirm', 'brake_button', 'brake_already', 'brake_done', 'brake_expired', 'brake_used', 'brake_used_open',
+    'brake_locked_title', 'brake_locked_link', 'brake_locked_cmd', 'brake_locked_hint', 'brake_unlocked_title', 'brake_unlocked_body') as $key)
 {
     if ($tm->invoke($zh, $key) === $tm->invoke($en, $key) || $tm->invoke($en, $key) === $key) { $missing[] = $key; }
 }
 check('every new message exists in English and in Chinese', $missing === array(), implode(' ', $missing));
+
+/* ------------------------------------------------------------------ */
+echo "Emergency brake\n";
+$clock = strtotime('2026-03-02 03:00:00 UTC');
+$brake = array('timezone' => 'UTC', 'site_name' => 'Shop <b>&', 'brake_url' => 'https://shop.example/brake.php', 'brake_secret' => str_repeat('k7', 20));
+$a = make($box, $clock, $brake);
+$a->custom('Something bad', array('x'), SecurityAlerts::URGENT, 'b1');
+$a->custom('Something minor', array('y'), SecurityAlerts::NOTICE, 'b2');
+$clock += 60; $a->run();
+$m = isset($box['line'][0]) ? $box['line'][0] : '';
+$link = preg_match('#(https://shop\.example/brake\.php\?t=([0-9]+\.[0-9a-f]{16}\.[0-9a-f]{32}))$#', $m, $lm) ? $lm[2] : '';
+check('an URGENT message ends with the brake link (signed token, on the site\'s own address)', $link !== '' && strpos($m, 'Lock the admin area for 4 hours') !== false, $m);
+$a->custom('Only a notice', array('z'), SecurityAlerts::NOTICE, 'b3');
+$clock += 60; $a->run();
+check('...a Notice-only message does not', isset($box['line'][1]) && strpos($box['line'][1], 'brake.php') === false);
+$g = $a->brakeRequest('GET', $link, '198.51.100.7');
+check('opening the link (as a chat app does for its preview) only shows the button; nothing is locked', $g['status'] === 200 && !$g['locked']
+    && strpos($g['html'], '<form method="post">') !== false && !$a->adminLocked() && strpos($g['html'], 'Shop &lt;b&gt;&amp;') !== false, $g['html']);
+$p = $a->brakeRequest('POST', $link, '198.51.100.7');
+check('pressing the button locks the admin area for brake_hours', $p['status'] === 200 && $p['locked'] && $a->adminLocked()
+    && $a->adminLockedUntil() === $clock + 4 * 3600, $p['html']);
+$u = $a->brakeRequest('POST', $link, '198.51.100.7');
+check('the same link a second time: "already used" (a link works once)', $u['status'] === 409 && strpos($u['html'], 'already been used') !== false);
+$before = count($box['line']);
+$clock += 60; $a->run();
+$m = (string) end($box['line']);
+check('the lock is announced on the next run (URGENT, with the time and the IP the button was pressed from)', count($box['line']) === $before + 1
+    && strpos($m, 'The admin area is locked') !== false && strpos($m, '198.51.100.7') !== false && strpos($m, 'URGENT') !== false, $m);
+$parts = explode('.', $link);
+$forged = $parts[0] . '.' . $parts[1] . '.' . str_repeat('0', 32);
+$a = make($box, $clock, $brake);
+check('a forged or mangled token: a plain "not found", nothing locked', $a->brakeRequest('POST', $forged)['status'] === 404
+    && $a->brakeRequest('GET', 'x')['status'] === 404 && $a->brakeRequest('POST', $link . 'a')['status'] === 404 && !$a->adminLocked());
+check('a link signed with another secret: not found', make($box, $clock, array_merge($brake, array('brake_secret' => str_repeat('z9', 20))))->brakeRequest('POST', $link)['status'] === 404);
+$clock += 25 * 3600;
+$x = $a->brakeRequest('POST', $link);
+check('a link older than brake_link_hours: "expired", nothing locked', $x['status'] === 410 && !$a->adminLocked());
+$a = make($box, $clock, array_merge($brake, array('brake_secret' => 'short')));
+$a->custom('Bad', array('x'), SecurityAlerts::URGENT, 'b9');
+$clock += 60; $a->run();
+check('a secret shorter than 32 characters: no link in messages, status() says why, the page answers "not found"',
+    isset($box['line'][0]) && strpos($box['line'][0], 'brake.php') === false && $a->brakeRequest('GET', $link)['status'] === 404
+    && count(preg_grep('/brake_secret is missing or shorter/', $a->status()['problems'])) === 1);
+$a = make($box, $clock, array_merge($brake, array('brake_allow_ips' => array('203.0.113.9'))));
+$until = $a->lockAdmin(2, 'command');
+check('--lock (lockAdmin): locked for the hours asked; an allowed IP is not locked out', $until === $clock + 7200 && $a->adminLocked('198.51.100.1')
+    && !$a->adminLocked('203.0.113.9') && count(preg_grep('/the admin area is LOCKED/', $a->status()['problems'])) === 1);
+$clock += 2 * 3600 + 1;
+check('the lock ends by itself at its time', !$a->adminLocked() && $a->adminLockedUntil() === null);
+$a->lockAdmin(1, 'command');
+check('--unlock (unlockAdmin) ends it early, and says so on the next run', $a->unlockAdmin() && !$a->adminLocked() && !$a->unlockAdmin());
+$clock += 60; $a->run();
+check('...the run after it tells of both the lock and the unlock', count($box['line']) === 1 && strpos($box['line'][0], 'The admin area is locked') !== false
+    && strpos($box['line'][0], 'The admin area is unlocked') !== false, json_encode($box['line']));
+$calls = array();
+$a = make($box, $clock, array_merge($brake, $base, $dc, $noLine));
+$a->custom('Discord urgent', array('x'), SecurityAlerts::URGENT, 'bd');
+$clock += 60; $a->run();
+$d = $via('discord');
+$c = $d ? (string) $d[0]['body']['content'] : '';
+check('on Discord the link comes after the code box, so it can be tapped', preg_match('/```\n\x{1F6D1} [^\n]*https:\/\/shop\.example\/brake\.php\?t=\S+$/u', $c) === 1
+    && substr_count($c, '```') === 2, $c);
+$calls = array();
+$a = make($box, $clock, array_merge($brake, $base, $tg, $noLine));
+$answer = array('telegram' => array(array(500, '{"ok":false,"description":"down"}')));
+$a->custom('Late urgent', array('x'), SecurityAlerts::URGENT, 'bl');
+$clock += 60; $a->run();
+$first = $via('telegram');
+$old = $first ? $first[0]['body']['text'] : '';
+$clock += 30 * 3600; $a->run();
+$t = $via('telegram');
+$new = count($t) > 1 ? $t[count($t) - 1]['body']['text'] : '';
+preg_match('/t=([0-9]+)\./', $old, $o1);
+preg_match('/t=([0-9]+)\./', $new, $o2);
+check('a delayed URGENT alert carries a fresh link (the kept one would have expired)', strpos($new, 'Delayed') !== false && substr_count($new, 'brake.php') === 1
+    && isset($o1[1], $o2[1]) && (int) $o2[1] > (int) $o1[1], $new);
 
 /* ------------------------------------------------------------------ */
 echo "Daily cap, urgent bypass, fallback\n";

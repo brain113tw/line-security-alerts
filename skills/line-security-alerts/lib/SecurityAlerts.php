@@ -47,6 +47,7 @@ final class SecurityAlerts
     const LOG = 0;      // keep a record only
     const NOTICE = 1;   // worth a message
     const URGENT = 2;   // send even if the daily cap is reached
+    const BRAKE_MARK = "\u{1F6D1} ";   // starts the emergency-brake line at the end of an URGENT message
 
     /** @var array */
     private $cfg;
@@ -194,6 +195,19 @@ final class SecurityAlerts
             'page_timeout'       => 10,            // seconds per request
             'page_max_bytes'     => 2097152,
 
+            /* Emergency brake (optional, off until both are set). URGENT alerts end with a link that locks the
+               admin area for `brake_hours` — the shop itself stays open — for the owner who gets an alert at
+               3 a.m. and cannot reach anyone. Opening the link only shows a page with a button (chat apps open
+               links to build previews); the button locks. A link is signed, works once and expires after
+               `brake_link_hours`. It can only LOCK: unlocking is `--unlock` on the server.
+               Your admin area must ask adminLocked() on every request (see integration.md); without that the
+               link locks nothing. */
+            'brake_url'          => '',            // public address of examples/security-brake.php copied into your site
+            'brake_secret'       => '',            // 32+ random characters, from an environment variable; never in a message
+            'brake_hours'        => 4,
+            'brake_link_hours'   => 24,
+            'brake_allow_ips'    => array(),       // IPs never locked out (e.g. your developer's office), exact match
+
             /* Your own channel (Slack, ntfy, SMS…): function(string $text, int $level): bool.
                Tried first; when it returns false (or is not set) the message goes on to Telegram, Discord, LINE,
                then e-mail. */
@@ -339,6 +353,7 @@ final class SecurityAlerts
             $findings = array_merge($findings, $this->checkFirewall($hour));
             $findings = array_merge($findings, $this->checkMoney($hour, $events));
             $findings = array_merge($findings, $this->checkCustom($events));
+            $findings = array_merge($findings, $this->checkBrake($events));
             $scan = array('ran' => false, 'quarantined' => 0);
             if ($this->cfg['file_scan'] && $this->cfg['scan_dirs'])
             {
@@ -514,6 +529,193 @@ final class SecurityAlerts
         {
         }
         return null;
+    }
+
+    /* ----------------------------------------------------------------------
+     * Emergency brake
+     * ---------------------------------------------------------------------- */
+
+    /**
+     * Ask this at the top of EVERY admin request (and in the login handler), before anything else:
+     *     if ($alerts->adminLocked($ip)) { http_response_code(503); exit('The admin area is locked for security.'); }
+     * True while the emergency brake is on. IPs in `brake_allow_ips` are never locked out. Cheap: one small file.
+     */
+    public function adminLocked($ip = '')
+    {
+        if ($ip !== '' && in_array(trim((string) $ip), $this->listOf($this->cfg['brake_allow_ips']), true))
+        {
+            return false;
+        }
+        return $this->adminLockedUntil() !== null;
+    }
+
+    /** @return int|null until when the admin area is locked; null = not locked */
+    public function adminLockedUntil()
+    {
+        $f = $this->cfg['state_dir'] . '/brake.json';
+        $j = is_file($f) ? json_decode((string) @file_get_contents($f), true) : null;
+        if (!is_array($j) || !isset($j['until']) || (int) $j['until'] <= $this->now())
+        {
+            return null;
+        }
+        return (int) $j['until'];
+    }
+
+    /** Locks the admin area now (the command line's --lock, or the brake page). Returns until when. Announced on the next run. */
+    public function lockAdmin($hours = null, $by = 'command', $ip = '')
+    {
+        $hours = max(0.25, min(72.0, (float) ($hours === null ? $this->cfg['brake_hours'] : $hours)));
+        $now = $this->now();
+        $until = max((int) $this->adminLockedUntil(), $now + (int) round($hours * 3600));
+        @file_put_contents($this->path('brake.json'), (string) $this->json(array('until' => $until, 'at' => $now, 'by' => (string) $by)), LOCK_EX);
+        $this->record('brake', array('what' => 'locked', 'by' => (string) $by, 'ip' => (string) $ip, 'until' => $until));
+        return $until;
+    }
+
+    /** Ends the lock early (the command line's --unlock). Announced on the next run. @return bool false = it was not locked */
+    public function unlockAdmin()
+    {
+        $was = $this->adminLockedUntil() !== null;
+        @unlink($this->path('brake.json'));
+        if ($was)
+        {
+            $this->record('brake', array('what' => 'unlocked', 'by' => 'command', 'ip' => '', 'until' => 0));
+        }
+        return $was;
+    }
+
+    /**
+     * The brake page: everything examples/security-brake.php needs. GET (or HEAD) only shows what the button
+     * does — chat apps open links to make previews, so opening must never lock. POST with a valid token locks.
+     * An invalid token gets a plain "not found": the page tells a stranger nothing.
+     *
+     * @return array array('status' => HTTP status, 'html' => a small complete page, 'locked' => bool)
+     */
+    public function brakeRequest($method, $token, $ip = '')
+    {
+        $method = strtoupper((string) $method);
+        $site = htmlspecialchars((string) $this->cfg['site_name'], ENT_QUOTES, 'UTF-8');
+        $page = function ($status, $body, $locked = false) use ($site) {
+            $html = '<!doctype html><html lang="' . ($this->cfg['language'] === 'zh-TW' ? 'zh-Hant-TW' : 'en') . '"><head><meta charset="utf-8">'
+                . '<meta name="viewport" content="width=device-width, initial-scale=1"><meta name="robots" content="noindex">'
+                . '<title>' . htmlspecialchars($this->t('brake_title'), ENT_QUOTES, 'UTF-8') . '</title>'
+                . '<style>body{font:1.125rem/1.6 system-ui,sans-serif;max-width:34rem;margin:2rem auto;padding:0 1rem}'
+                . 'button{font:inherit;padding:.8rem 1.4rem;border:0;border-radius:.5rem;background:#b42318;color:#fff;cursor:pointer}</style>'
+                . '</head><body><h1>' . htmlspecialchars($this->t('brake_title'), ENT_QUOTES, 'UTF-8') . '</h1><p><strong>' . $site . '</strong></p>' . $body . '</body></html>';
+            return array('status' => $status, 'html' => $html, 'locked' => $locked);
+        };
+        $check = $this->brakeToken((string) $token);
+        if ($check === 'bad' || !$this->brakeReady())
+        {
+            return array('status' => 404, 'html' => '<!doctype html><title>Not found</title><p>Not found.</p>', 'locked' => false);
+        }
+        $when = function ($t) { return date('m/d H:i', (int) $t); };
+        if ($check === 'expired')
+        {
+            return $page(410, '<p>' . htmlspecialchars($this->t('brake_expired', (int) $this->cfg['brake_link_hours']), ENT_QUOTES, 'UTF-8') . '</p>');
+        }
+        $until = $this->adminLockedUntil();
+        if ($check === 'used')
+        {
+            return $page(409, '<p>' . htmlspecialchars($until !== null ? $this->t('brake_used', $when($until)) : $this->t('brake_used_open'), ENT_QUOTES, 'UTF-8') . '</p>', $until !== null);
+        }
+        if ($method !== 'POST')
+        {
+            return $page(200, '<p>' . htmlspecialchars($this->t('brake_confirm', (int) $this->cfg['brake_hours']), ENT_QUOTES, 'UTF-8') . '</p>'
+                . ($until !== null ? '<p>' . htmlspecialchars($this->t('brake_already', $when($until)), ENT_QUOTES, 'UTF-8') . '</p>' : '')
+                . '<form method="post"><input type="hidden" name="t" value="' . htmlspecialchars((string) $token, ENT_QUOTES, 'UTF-8') . '">'
+                . '<button type="submit">' . htmlspecialchars($this->t('brake_button', (int) $this->cfg['brake_hours']), ENT_QUOTES, 'UTF-8') . '</button></form>');
+        }
+        $this->brakeTokenUse((string) $token);
+        $until = $this->lockAdmin(null, 'link', (string) $ip);
+        return $page(200, '<p>' . htmlspecialchars($this->t('brake_done', $when($until)), ENT_QUOTES, 'UTF-8') . '</p>', true);
+    }
+
+    /** A fresh brake link (valid `brake_link_hours`, once), or '' when the brake is not set up. */
+    public function brakeLink()
+    {
+        if (!$this->brakeReady())
+        {
+            return '';
+        }
+        $exp = $this->now() + (int) round(max(1.0, (float) $this->cfg['brake_link_hours']) * 3600);
+        $nonce = bin2hex(random_bytes(8));
+        $url = trim((string) $this->cfg['brake_url']);
+        return $url . (strpos($url, '?') === false ? '?' : '&') . 't=' . $exp . '.' . $nonce . '.' . $this->brakeSign($exp, $nonce);
+    }
+
+    private function brakeReady()
+    {
+        return preg_match('#^https?://\S+$#i', trim((string) $this->cfg['brake_url'])) && strlen((string) $this->cfg['brake_secret']) >= 32;
+    }
+
+    private function brakeSign($exp, $nonce)
+    {
+        return substr(hash_hmac('sha256', 'brake|' . (int) $exp . '|' . $nonce, (string) $this->cfg['brake_secret']), 0, 32);
+    }
+
+    /** @return string 'ok' | 'expired' | 'used' | 'bad' */
+    private function brakeToken($token)
+    {
+        if (!$this->brakeReady() || !preg_match('/^([0-9]{9,11})\.([0-9a-f]{16})\.([0-9a-f]{32})$/', $token, $m)
+            || !hash_equals($this->brakeSign((int) $m[1], $m[2]), $m[3]))
+        {
+            return 'bad';
+        }
+        if ((int) $m[1] < $this->now())
+        {
+            return 'expired';
+        }
+        $used = $this->brakeUsed();
+        return isset($used[$m[2]]) ? 'used' : 'ok';
+    }
+
+    private function brakeUsed()
+    {
+        $f = $this->cfg['state_dir'] . '/brake-used.json';
+        $j = is_file($f) ? json_decode((string) @file_get_contents($f), true) : null;
+        $out = array();
+        foreach (is_array($j) ? $j : array() as $nonce => $exp)
+        {
+            if ((int) $exp >= $this->now()) { $out[(string) $nonce] = (int) $exp; }   // expired links need no memory
+        }
+        return $out;
+    }
+
+    private function brakeTokenUse($token)
+    {
+        if (preg_match('/^([0-9]+)\.([0-9a-f]{16})\./', $token, $m))
+        {
+            $used = $this->brakeUsed();
+            $used[$m[2]] = (int) $m[1];
+            @file_put_contents($this->path('brake-used.json'), (string) $this->json($used), LOCK_EX);
+        }
+    }
+
+    /** The brake was pulled or released since the last run: say so (URGENT: someone judged it an emergency). */
+    private function checkBrake(array $fresh)
+    {
+        $out = array();
+        foreach ($fresh as $e)
+        {
+            if ($e['k'] !== 'brake')
+            {
+                continue;
+            }
+            $d = $e['d'];
+            if ($d['what'] === 'locked')
+            {
+                $out[] = $this->finding('brake', 'brake:lock:' . $e['t'], self::URGENT, $this->t('brake_locked_title'),
+                    array($this->t($d['by'] === 'link' ? 'brake_locked_link' : 'brake_locked_cmd', date('m/d H:i', $e['t']), date('m/d H:i', (int) $d['until']),
+                        $d['ip'] !== '' ? $d['ip'] : '?'), $this->t('brake_locked_hint')), 1);
+            }
+            else
+            {
+                $out[] = $this->finding('brake', 'brake:unlock:' . $e['t'], self::NOTICE, $this->t('brake_unlocked_title'),
+                    array($this->t('brake_unlocked_body', date('m/d H:i', $e['t']))), 1);
+            }
+        }
+        return $out;
     }
 
     /**
@@ -745,6 +947,7 @@ final class SecurityAlerts
                 'failing_since' => isset($state['ping_fail']['since']) ? (int) $state['ping_fail']['since'] : null,
             ),
             'pages'        => $this->pagesStatus(),
+            'brake'        => array('ready' => $this->brakeReady(), 'locked_until' => $this->adminLockedUntil()),
             'expect'       => null,
             /* the last answer from lineFriendCount(): array('n' => about how many friends, 'at' => when asked) */
             'line_friends' => null,
@@ -798,6 +1001,14 @@ final class SecurityAlerts
         if ($out['outside_checkin']['failing'] >= 3) { $p[] = 'the outside check-in address has failed ' . $out['outside_checkin']['failing'] . ' times in a row'; }
         if ($scan && !$out['files']['baseline_ready'] && $out['last_run'] !== null) { $p[] = 'the file baseline is not complete yet'; }
         if ($this->cfg['site_root'] === '') { $p[] = 'file scan is off (site_root is not set)'; }
+        if (trim((string) $this->cfg['brake_url']) !== '' && !$this->brakeReady())
+        {
+            $p[] = 'brake_url is set, but brake_secret is missing or shorter than 32 characters (or the address is not http/https): no emergency-brake link is added';
+        }
+        if ($out['brake']['locked_until'] !== null)
+        {
+            $p[] = 'the admin area is LOCKED by the emergency brake until ' . date('Y-m-d H:i', $out['brake']['locked_until']) . ' (--unlock ends it early)';
+        }
         $exp = $this->expectState();
         if ($exp !== null)
         {
@@ -2615,6 +2826,10 @@ final class SecurityAlerts
             {
                 usort($send, function ($a, $b) use ($findings) { return $findings[$b]['level'] - $findings[$a]['level']; });
                 $text = $this->compose(array_map(function ($i) use ($findings) { return $findings[$i]; }, $send), $now);
+                if ($urgent)
+                {
+                    $text = $this->withBrake($text);
+                }
                 $r = $this->deliver($text, $urgent ? self::URGENT : self::NOTICE);
                 foreach ($send as $i)
                 {
@@ -2708,7 +2923,12 @@ final class SecurityAlerts
                 $keep[] = $item;
                 continue;
             }
-            $r = $this->deliver($this->cut($this->t('late_note', $when) . "\n\n" . (string) $item['text'], 4900), !empty($item['urgent']) ? self::URGENT : self::NOTICE);
+            $late = $this->cut($this->t('late_note', $when) . "\n\n" . (string) $item['text'], 4700);
+            if (!empty($item['urgent']))
+            {
+                $late = $this->withBrake($late);   // the link in the kept text may have expired by now: a fresh one
+            }
+            $r = $this->deliver($late, !empty($item['urgent']) ? self::URGENT : self::NOTICE);
             if ($r === 'failed')
             {
                 $stop = true;
@@ -2941,6 +3161,14 @@ final class SecurityAlerts
             $text = $cut . "\n…";
         }
         return $text;
+    }
+
+    /** The last line of an URGENT message: the emergency-brake link (replacing an older one), when the brake is set up. */
+    private function withBrake($text)
+    {
+        $text = (string) preg_replace('/\n\n' . self::BRAKE_MARK . '[^\n]*$/u', '', (string) $text);
+        $link = $this->brakeLink();
+        return $link === '' ? $text : $text . "\n\n" . $this->t('brake_line', (int) $this->cfg['brake_hours'], $link);
     }
 
     /**
@@ -3192,8 +3420,17 @@ final class SecurityAlerts
      */
     private function sendDiscord($text)
     {
+        /* The emergency-brake link must be tappable, so it goes AFTER the code block. It is our own text (a fixed
+           sentence and the site's own address), never a name taken from outside. */
+        $tail = '';
+        if (preg_match('/\n\n(' . self::BRAKE_MARK . '[^\n]*)$/u', $text, $bm))
+        {
+            $tail = $bm[1];
+            $text = substr($text, 0, -strlen($bm[0]));
+        }
         $text = str_replace('```', "`\u{200B}`\u{200B}`", $text);   // three backticks in a name cannot end the code block early
-        $parts = $this->split($text, 1990 - 8);                     // 8 = the code block's own "```\n" and "\n```"
+        $parts = $this->split($text, 1990 - 8 - ($tail === '' ? 0 : $this->units($tail) + 1));   // 8 = the code block's own "```\n" and "\n```"
+        $last = count($parts) - 1;
         $ok = 0;
         $why = '';
         foreach ($this->listOf($this->cfg['discord_webhook_url']) as $url)
@@ -3204,10 +3441,11 @@ final class SecurityAlerts
                 continue;
             }
             $all = true;
-            foreach ($parts as $part)
+            foreach ($parts as $i => $part)
             {
                 /* flags 4 = no link previews */
-                $body = $this->json(array('content' => "```\n" . $part . "\n```", 'allowed_mentions' => array('parse' => array()), 'flags' => 4), JSON_UNESCAPED_UNICODE);
+                $body = $this->json(array('content' => "```\n" . $part . "\n```" . ($i === $last && $tail !== '' ? "\n" . $tail : ''),
+                    'allowed_mentions' => array('parse' => array()), 'flags' => 4), JSON_UNESCAPED_UNICODE);
                 $r = $this->post($url, $body);
                 if (!$r[0])
                 {
@@ -3812,6 +4050,21 @@ final class SecurityAlerts
                 'page_data_url' => 'code written into the page itself (a data: address)',
                 'page_lost_title' => 'The page-watch records have disappeared',
                 'page_lost_body' => 'What your pages looked like is no longer on record; the next check starts over from the pages as they are now. If nobody reset the monitor, someone may be covering their tracks.',
+                'brake_line' => "\u{1F6D1} Not your doing, and nobody to call? Lock the admin area for %d hours (the shop stays open): %s",
+                'brake_title' => 'Emergency brake',
+                'brake_confirm' => 'This locks the admin area for %d hours: nobody can sign in or use it, you included. The shop stays open for customers. Use it when an alert says something is wrong and you cannot reach your developer.',
+                'brake_button' => 'Lock the admin area for %d hours',
+                'brake_already' => 'It is already locked until %s; pressing the button keeps it locked at least that long.',
+                'brake_done' => 'Locked until %s. The shop is still open. A message confirming the lock is on its way. Your developer can unlock it early with --unlock on the server.',
+                'brake_expired' => 'This link has expired (a link works for %d hours). Use the link in a newer alert, or ask your developer to lock the admin area with --lock on the server.',
+                'brake_used' => 'This link has already been used. The admin area is locked until %s.',
+                'brake_used_open' => 'This link has already been used, and the lock has ended since. Use the link in a newer alert to lock again.',
+                'brake_locked_title' => 'The admin area is locked',
+                'brake_locked_link' => 'Locked with the emergency link at %s, until %s (pressed from IP %s). Customers can still use the shop; nobody can use the admin area until then.',
+                'brake_locked_cmd' => 'Locked by command on the server at %s, until %s. Customers can still use the shop; nobody can use the admin area until then.',
+                'brake_locked_hint' => 'If nobody on your side did this, someone has your alert messages or is on the server: tell your developer. To end it early: --unlock on the server.',
+                'brake_unlocked_title' => 'The admin area is unlocked',
+                'brake_unlocked_body' => 'The emergency lock was ended by command on the server at %s.',
             ),
             'zh-TW' => array(
                 'header' => "🔒 網站安全提醒｜%s（%s）",
@@ -3913,6 +4166,21 @@ final class SecurityAlerts
                 'page_data_url' => '直接寫在網頁裡的程式（data: 網址）',
                 'page_lost_title' => '網頁監看的紀錄不見了',
                 'page_lost_body' => '原本記下的網頁樣子不見了，下次檢查會從網頁現在的樣子重新開始。如果沒有人重設過，可能是有人在湮滅痕跡。',
+                'brake_line' => "\u{1F6D1} 不是你們做的、又聯絡不到人？按這裡把後台鎖住 %d 小時（前台照常營業）：%s",
+                'brake_title' => '緊急煞車',
+                'brake_confirm' => '按下去之後，後台會鎖住 %d 小時：任何人都不能登入或使用後台，包括你自己。前台照常讓客人購物。收到通知說出事了、又聯絡不到工程師的時候用。',
+                'brake_button' => '把後台鎖住 %d 小時',
+                'brake_already' => '後台已經鎖到 %s；再按一次，至少會鎖到那個時間。',
+                'brake_done' => '已經鎖到 %s。前台照常營業。確認的通知稍後會傳給你。工程師可以在主機上用 --unlock 提早解鎖。',
+                'brake_expired' => '這個連結已經過期（每個連結只能在 %d 小時內使用）。請用比較新的通知裡的連結，或請工程師在主機上用 --lock 鎖住後台。',
+                'brake_used' => '這個連結已經用過了。後台鎖到 %s。',
+                'brake_used_open' => '這個連結已經用過了，而且那次的鎖已經結束。要再鎖一次，請用比較新的通知裡的連結。',
+                'brake_locked_title' => '後台已經鎖住',
+                'brake_locked_link' => '%s 有人按了緊急煞車連結，鎖到 %s（從 IP %s 按的）。客人照常可以購物；在那之前任何人都不能用後台。',
+                'brake_locked_cmd' => '%s 在主機上用指令鎖住，鎖到 %s。客人照常可以購物；在那之前任何人都不能用後台。',
+                'brake_locked_hint' => '如果不是你們這邊按的，代表有人拿到了你的通知訊息，或已經在主機上：請告訴工程師。要提早解鎖：在主機上執行 --unlock。',
+                'brake_unlocked_title' => '後台已經解鎖',
+                'brake_unlocked_body' => '%s 在主機上用指令結束了緊急鎖定。',
             ),
         );
         $lang = isset($s[$this->cfg['language']]) ? $this->cfg['language'] : 'en';

@@ -28,8 +28,8 @@ Read these when you need them:
 - [reference/when-an-alert-arrives.md](reference/when-an-alert-arrives.md) / [繁體中文](reference/when-an-alert-arrives.zh-TW.md) / [日本語](reference/when-an-alert-arrives.ja.md) — the owner's checklist: what each message means and what to do first
 - [reference/hardening-checklist.md](reference/hardening-checklist.md) / [繁體中文](reference/hardening-checklist.zh-TW.md) / [日本語](reference/hardening-checklist.ja.md) — the prevention side: what makes a break-in less likely in the first place
 - [reference/line-setup.md](reference/line-setup.md) — getting a channel access token and the user/group ID
-- [examples/](examples/) — a config template and the cron entry point (`--status`, `--test`, `--test-all`, `--audit`, `--pages`, `--expect 30m` / `--expect off`, `--fingerprint`, `--manifest`, `--rebaseline`)
-- `scripts/selftest.php` — 245 checks, no network; `scripts/fake_line_server.php` — a local stand-in for LINE, Telegram, Discord, the check-in service, a webhook, and a small shop that can be switched to "hacked" (`/shop/hack`) for trying the page watch
+- [examples/](examples/) — a config template, the cron entry point (`--status`, `--test`, `--test-all`, `--audit`, `--pages`, `--expect 30m` / `--expect off`, `--lock` / `--unlock`, `--fingerprint`, `--manifest`, `--rebaseline`) and the optional emergency-brake page (`security-brake.php`)
+- `scripts/selftest.php` — 261 checks, no network; `scripts/fake_line_server.php` — a local stand-in for LINE, Telegram, Discord, the check-in service, a webhook, and a small shop that can be switched to "hacked" (`/shop/hack`) for trying the page watch
 - `scripts/fingerprint.php` — the code fingerprint of any folder, to compare a clean local copy with the one the server reports
 - `scripts/demo.php` — replays a few days at a small shop and prints the exact messages the owner
   would get (`--lang=zh-TW`, `--site="Their shop"`). Run it and show the output when the user asks
@@ -103,6 +103,11 @@ Find and note, with file paths:
   Big5 / GBK / Latin-1 names). Then also run the self-test on the server itself.
 - `page_watch` / `page_allow`: from step 1.11, if the user wants it. Only the user's own pages, never
   someone else's site. It runs from the cron job only (not from `tick()` in a page view).
+- Emergency brake (only if the user asks for it): copy `examples/security-brake.php` into the web root,
+  set `brake_url` and have the user put a `brake_secret` of 32+ random characters into the environment;
+  then add `adminLocked($ip)` at the top of EVERY admin request and in the login handler (integration.md,
+  section 16), leaving out machine callbacks (payments, webhooks, cron URLs). Test it on a local copy:
+  `--lock 1h` must lock you out of the admin, `--unlock` must let you back in.
 
 ### 3. Add the hooks
 
@@ -187,6 +192,10 @@ Tell the user, in their language:
   run `--expect 30m` before uploading (and `--expect off` when done): the changes then come as one
   summary, while anything backdoor-like is still reported at once. In a deploy script, put those two
   around the upload. After a big trusted deployment they can also run `--rebaseline` (itself announced);
+- with the emergency brake: the last line of an URGENT alert locks the admin area for a few hours
+  (opening the link only shows a button; the button locks), the shop stays open, only the developer
+  can unlock (`--unlock`), and pressing it is announced. Who should press it, when: the owner, when an
+  alert is not their own doing and nobody can be reached;
 - with `page_watch`: what the three page alerts mean (a new outside script / form target / redirect;
   something only search engines or Google visitors get; new outside links), that site names are
   written as `name[.]com` on purpose, and that adding a service of their own means one alert, after
@@ -222,6 +231,9 @@ Tell the user, in their language:
   the risk first and build it as a separate, reversible step.
 - `page_watch` lists the user's own pages only. Do not put a site into `page_allow` that the user has
   not recognised as theirs: the allow list is exactly where an injected skimmer would want to be.
+- The emergency brake stays off unless the user asks for it. Never print `brake_secret` or a brake
+  link with a valid token in your replies or logs (a link is a key to locking their admin). Never press
+  a brake link or run `--lock` on a live site yourself.
 - `--expect` is for the user's own announced updates. Do not open a window to make your own test
   changes look quiet; say what you are about to change instead.
 - `quarantine_uploads` (rename new program files that appear in upload folders) stays OFF unless the

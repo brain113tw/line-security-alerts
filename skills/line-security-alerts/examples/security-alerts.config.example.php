@@ -61,6 +61,15 @@ return array(
     // 'page_watch' => array('https://example.com/', 'https://example.com/cart'),
     // 'page_allow' => array('googletagmanager.com', 'your-payment-provider.example'),   // sub-domains included
 
+    /* Optional emergency brake: URGENT alerts end with a link that locks the admin area for brake_hours (the
+       shop stays open). Copy examples/security-brake.php into the web root, put its address here, and make
+       the admin area ask adminLocked() on every request (integration.md, section 16). The secret: 32+ random
+       characters, e.g. from  php -r "echo bin2hex(random_bytes(24));"  — environment variable, not git. */
+    // 'brake_url'       => 'https://example.com/security-brake.php',
+    // 'brake_secret'    => (string) getenv('ALERT_BRAKE_SECRET'),
+    // 'brake_hours'     => 4,
+    // 'brake_allow_ips' => array('203.0.113.10'),   // your developer's fixed IP, never locked out
+
     /* The monitor watching itself.
        - Once a week it says "still on duty" (0 = never) and prints one fingerprint of all code files, so
          your chat history holds a copy that nobody on the server can rewrite.

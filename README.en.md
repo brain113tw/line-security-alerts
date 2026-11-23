@@ -106,6 +106,7 @@ wrong and keeps failing, the weekly check-in gains a warning line.
 | Firewall | Too many blocked requests in an hour (overall or from one IP) | Notice |
 | Money | A burst of manual refunds, paid-order cancellations or balance adjustments, or one unusually large one | Notice |
 | Page content (optional) | A page starts loading code from another site, a form starts sending to another site, visitors get redirected away; spam links only Google is shown; new outside links | URGENT / Notice |
+| Emergency brake (optional) | Someone pressed the brake link in an alert and the admin area is locked; unlocked by command | URGENT / Notice |
 | Custom | Your own checks (e.g. a failed backup) | You choose |
 | Itself | Fingerprints erased, the state folder wiped, the baseline reset by hand — trying to blind the monitor is itself reported | URGENT / Notice |
 | Weekly check-in | One "still on duty" message a week with the number of checks run and things reported, plus a "code fingerprint" to compare with last week's | (not an alert) |
@@ -229,6 +230,29 @@ An announcement is no cover:
 
 With automated deployments, put `--expect 20m` at the start of the deploy and `--expect off` at the end.
 
+### Emergency brake (optional)
+
+An URGENT alert at 3 a.m., and no developer to call: what can an owner who does not code do? Once set
+up, every URGENT alert ends with one more line:
+
+```
+🛑 Not your doing, and nobody to call? Lock the admin area for 4 hours (the shop stays open): https://example.com/security-brake.php?t=…
+```
+
+Opening the link only shows a page with a button (LINE opens links to build previews, so opening must
+never lock anything). **Pressing the button** locks the admin area for 4 hours: nobody can sign in or
+use it, including whoever is already signed in; customers keep shopping. The next run sends "The
+admin area is locked", with the time and the IP the button was pressed from.
+
+- The link is signed, works once and expires after 24 hours; a tampered link just gets "Not found".
+- The web side can **only lock**. Unlocking is `--unlock` on the server, or waiting.
+- Worst case, someone who can read your alerts presses it: the admin area is locked for a few hours,
+  and you are told at once.
+- Your developer does three things: puts `examples/security-brake.php` into the site, sets `brake_url`
+  and a `brake_secret` of 32+ characters, and adds one `adminLocked()` check at the top of every admin
+  page ([integration.md, section 16](skills/line-security-alerts/reference/integration.md)). Without
+  that check, pressing locks nothing.
+
 ## Where it fits among other tools
 
 What this package is for: **shared hosting, no root access, a custom or hand-written PHP site, and
@@ -243,6 +267,11 @@ an owner who reads LINE all day**. Other tools do some things better, and they c
 | "Is my cron job still running?" | A cron check-in service such as healthchecks.io; put its address into `ping_url` |
 | "Can people open my site?" | An outside uptime monitor such as UptimeRobot. This package runs inside the server: if the whole server is down, it cannot send anything |
 | "Does Google think my site was hacked?" | Google Search Console, "Security issues". It sees what Google's real crawler gets, including injections the page watch cannot trigger from your server |
+
+Legal duties after a breach differ by country. The [Traditional Chinese README](README.md) sums up
+Taiwan's (personal data law, the 72-hour rule for online retailers) and the
+[Japanese README](README.ja.md) Japan's (APPI reporting, the IPA EC-site guideline, the credit-card
+security guideline), each with official sources. Not legal advice.
 
 It uses the **LINE Messaging API**. LINE Notify, which many older guides rely on, was shut down on
 31 March 2025.
@@ -265,6 +294,19 @@ Then, inside your website's project, ask Claude: "Add LINE security alerts to my
 Claude surveys where logins, admin accounts, uploads and money operations live, confirms with you,
 adds the hooks, tests everything against the bundled fake LINE server, and only then asks you to
 send one real test message.
+
+**To install a fixed, reviewed version** (advisable for a security tool), add the release tag:
+
+```
+/plugin marketplace add brain113tw/line-security-alerts#v1.3.0
+/plugin install line-security-alerts@line-security-tools
+```
+
+The code then does not change under you (third-party marketplaces do not auto-update by default
+anyway). To upgrade, read [CHANGELOG.md](CHANGELOG.md), then remove the marketplace and add it again
+with the new tag. From 1.3.0 on, every release on GitHub's Releases page lists the SHA-256 of
+`lib/SecurityAlerts.php`, to compare with the file you got (`sha256sum`, or
+`php skills/line-security-alerts/scripts/fingerprint.php`).
 
 ### B. Copy the skill only
 
@@ -415,6 +457,9 @@ succeeds nothing else is used. The shape is at the end of the config template.
 | `page_allow` | | Outside sites your pages use on purpose (e.g. `googletagmanager.com`, sub-domains included): never reported |
 | `page_watch_hours` / `page_links` | 1 / on | Hours between page reads / whether new outside links are reported |
 | `line_friends_warn` | 20 | Warn when the LINE account that sends alerts has more friends than this (0 = do not ask) |
+| `brake_url`, `brake_secret` | | Emergency brake (optional): the brake page's address, a secret of 32+ characters; see "Emergency brake" above |
+| `brake_hours` / `brake_link_hours` | 4 / 24 | Hours the admin area stays locked / hours a link stays valid |
+| `brake_allow_ips` | | IPs never locked out (e.g. your developer's fixed IP) |
 | `quiet_hours` / `daily_cap` | 6 / 10 | Repeat window / messages per day |
 | `heartbeat_days` | 7 | Days between "still on duty" messages (0 = never) |
 | `line_quota_check` | on | With the weekly check-in, ask LINE how many messages were sent this month and what the limit is |
@@ -433,11 +478,11 @@ The full list is `SecurityAlerts::defaults()`. Thresholds are starting points �
 php skills/line-security-alerts/scripts/selftest.php
 ```
 
-245 scenario checks (logins, devices, accounts, firewall, money, files, web-shell patterns, weekly
+261 scenario checks (logins, devices, accounts, firewall, money, files, web-shell patterns, weekly
 check-in and fingerprint, wiped or edited records, upgrading old fingerprints, outside check-in,
 quarantine, timestamps put back, delayed delivery, non-UTF-8 names, daily cap, e-mail fallback,
 Telegram / Discord order, long messages in parts, "too many requests", update windows, LINE friend
-count, page watch read four ways and links shown only to the crawler…), no network. On every change GitHub runs them again on Linux (PHP 7.4–8.5)
+count, page watch read four ways and links shown only to the crawler, the emergency brake…), no network. On every change GitHub runs them again on Linux (PHP 7.4–8.5)
 and Windows.
 
 > **⚠️ Your antivirus may raise a warning — that is expected**
@@ -484,6 +529,21 @@ only the crawler gets, visitors from Google redirected away), for trying the pag
 - Test on a local or staging copy; never attack your production site to "see if it works".
 - Found a security problem in this package itself? Please do not publish the details; see
   [SECURITY.md](SECURITY.md).
+
+### What this skill tells Claude to do, and not to do
+
+Installing someone else's skill means letting it instruct your Claude, so here it is plainly.
+[SKILL.md](skills/line-security-alerts/SKILL.md) is plain text; read it yourself. It tells Claude:
+
+- **To do**: read your site's code to find logins, accounts and uploads, and confirm them with you
+  first; copy `lib/SecurityAlerts.php` into your project and add one line at each of those places;
+  test locally against the bundled fake servers; send one real test message **only with your OK**.
+- **Not to do**: download or run any other code from the internet; put keys, user IDs or webhook
+  addresses into messages, logs, version control or its own replies; sign you up for outside
+  services; attack your live site to test; delete files or block IPs on its own; change server
+  settings or DNS; switch on anything that acts (quarantine, emergency brake) unless you ask.
+- The plugin ships no hooks, no MCP server and nothing that runs in the background: documents and PHP
+  files only.
 
 What changed in each version is in [CHANGELOG.md](CHANGELOG.md).
 

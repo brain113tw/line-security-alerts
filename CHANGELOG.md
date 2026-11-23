@@ -20,12 +20,30 @@
   into, that key can message every friend: alerts belong in an account of their own. The docs now say
   so plainly.
   提醒通知要用專用的 LINE 帳號：金鑰在主機上，被偷就能發訊息給所有好友。
+- **Emergency brake** (optional; `brake_url`, `brake_secret`, `examples/security-brake.php`): URGENT
+  alerts end with a signed, one-time, expiring link. Opening it shows a button (chat-app previews
+  lock nothing); the button locks the admin area for `brake_hours` while the shop stays open. The
+  site asks `adminLocked()` on every admin request. Only `--unlock` on the server unlocks; the lock is
+  announced. `--lock 4h` from the server.
+  緊急煞車：緊急通知最後一行可以把後台鎖住幾小時，前台照常營業；網頁那邊只能鎖、不能解鎖。
+- **Installing a fixed version**: the READMEs show `#v1.3.0` installs; from this release on, the
+  Releases page lists the SHA-256 of `lib/SecurityAlerts.php`. The CI pins its actions to full
+  commits. The READMEs say what the skill tells Claude to do and not to do.
+  說明怎麼裝固定版本、怎麼比對檔案指紋，以及這個 skill 會叫 Claude 做什麼、不做什麼。
+- Prevention checklist: a decoy key (canarytokens) that tells you when someone reads your server's
+  files, and Google Search Console's "Security issues".
+  預防清單加上「誘餌金鑰」和 Google Search Console。
+- Japanese README: how the package relates to IPA's EC-site guideline, the credit-card security
+  guideline 6.1 and breach reporting under the APPI (with sources). Traditional Chinese guide: the
+  notification duties under Taiwan's personal data law (with sources).
+  日本語：IPA・クレジットカードガイドライン・個人情報保護法との関係。中文：台灣個資法的通知義務。
 - The fake server has a shop (`/shop/`, `/shop/hack`) and answers LINE's friend-count question.
-- Self-test: 245 checks.
+- Self-test: 261 checks.
 
-Upgrading from 1.2.x: replace `lib/SecurityAlerts.php` and the cron entry (for `--expect`, `--pages`
-and the new `--status` lines). Nothing else changes until you set `page_watch`; the friend-count
-question is a GET to LINE once a week (`'line_friends_warn' => 0` turns it off).
+Upgrading from 1.2.x: replace `lib/SecurityAlerts.php` and the cron entry (for `--expect`, `--pages`,
+`--lock` / `--unlock` and the new `--status` lines). Nothing else changes until you set `page_watch`
+or the brake; the friend-count question is a GET to LINE once a week (`'line_friends_warn' => 0`
+turns it off).
 
 ## 1.2.0 — 2026-11-23
 

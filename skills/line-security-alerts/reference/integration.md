@@ -228,6 +228,7 @@ register_shutdown_function(function () {
 | `pages.json` | page watch: per page, the outside sites seen (by category, with when each was first seen) and failed reads in a row |
 | `expect.json` | an announced update window (`--expect`) and the changes collected in it; removed when its summary is sent |
 | `line-friends.json` | the last answer to "how many friends does the alert account have" |
+| `brake.json`, `brake-used.json` | the emergency lock (until when) and the brake links already used |
 | `.htaccess`, `index.html` | deny-all for Apache, empty index |
 
 The check-in address (`ping_url`) is not written to any of them.
@@ -571,7 +572,54 @@ open, so a changed fingerprint is never shown without the summary that explains 
 If the scan cannot finish within `scan_time_budget` in one go, `--expect` refuses to open the window
 (it would let unread changes count as expected) and asks to try again a few minutes later.
 
-## 16. When an alert arrives
+## 16. Optional: the emergency brake
+
+For the owner who gets an URGENT alert at 3 a.m. and cannot reach anyone: the alert ends with a link
+that locks the admin area for a few hours while the shop stays open.
+
+```php
+'brake_url'       => 'https://example.com/security-brake.php',   // where you put examples/security-brake.php
+'brake_secret'    => getenv('ALERT_BRAKE_SECRET'),               // 32+ random characters
+'brake_hours'     => 4,
+'brake_link_hours'=> 24,
+'brake_allow_ips' => array(),                                    // exact IPs never locked out
+```
+
+Three steps:
+
+1. Copy `examples/security-brake.php` into the web root (any name), fix its two `require` paths, and if
+   the site is behind a proxy/CDN, pass the same trusted client IP the rest of the site uses.
+2. Make the admin area ask, **at the top of every admin request and in the login handler**:
+
+   ```php
+   if (security_alerts()->adminLocked($clientIp)) {
+       http_response_code(503);
+       exit('The admin area is locked for security. Please contact the site owner.');
+   }
+   ```
+
+   Every request, not only the login: an intruder who is already signed in must be stopped too. Leave
+   out what machines call (payment callbacks, LINE webhooks, cron URLs) and the customer side.
+3. Put the address and the secret into the config; `--status` must show "emergency brake: ready".
+
+How it behaves:
+
+| | |
+|---|---|
+| The link | Added as the last line of every URGENT message (never to notices or the check-in): `brake_url?t=<expiry>.<nonce>.<HMAC-SHA256>`. Valid for `brake_link_hours`, once. A delayed alert gets a fresh link. On Discord it sits after the code box so it can be tapped |
+| Opening it (GET/HEAD) | A page that says what the button does, with the button. Nothing is locked: LINE and other chat apps open links to build previews |
+| The button (POST) | Locks for `brake_hours` (extends a running lock, never shortens it). The next run sends an URGENT "The admin area is locked", with the time and the IP the button was pressed from |
+| A bad, reused or expired link | "Not found" (no hint about the site), "already used", "expired" |
+| Unlock | `php security-alerts-cron.php --unlock`, or wait. Nothing on the web side can unlock. `--lock 4h` locks from the server |
+| State | `brake.json` (until when), `brake-used.json` (used links until they expire) in `state_dir` |
+
+What it is and is not: a lock on the admin area, the one place an intruder (or a stolen staff
+password) can change things. It does not stop an intruder who already has a shell on the server, it
+does not remove anything, and it locks out your own staff too — that is the point. Whoever can read
+the owner's chat can press it; the worst they can do is lock the admin area for a few hours, which is
+announced at once.
+
+## 17. When an alert arrives
 
 Give the owner the checklist in their language and ask them to keep it on their phone:
 
