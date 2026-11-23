@@ -3,7 +3,7 @@
 這個套件做的是「出事了讓你知道」。這份清單是另一半：讓事情比較不容易發生。
 兩邊都要有，因為任何一道防護都可能失守。
 
-（其中幾項是第一版公開後，網友回饋補充的，謝謝大家。）[English](hardening-checklist.md)
+（其中幾項是第一版公開後，網友回饋補充的，謝謝大家。）[English](hardening-checklist.md)／[日本語](hardening-checklist.ja.md)
 
 ## 一、每一項十分鐘，先做這些
 

@@ -1,6 +1,6 @@
 ---
 name: line-security-alerts
-description: Add "something looks wrong" security alerts to a PHP website, pushed to the owner's LINE (Telegram and Discord built in too, with e-mail fallback). Covers failed or new-device admin logins, admin account changes, new/changed code files and web shells, firewall blocks, and unusual refunds or balance adjustments. Stays silent when nothing is wrong. Use when someone wants intrusion alerts, file-integrity monitoring or admin-login alerts on LINE for a small PHP site, shop or CMS.
+description: Add "something looks wrong" security alerts to a PHP website, pushed to the owner's LINE (Telegram and Discord built in too, with e-mail fallback). Covers failed or new-device admin logins, admin account changes, new/changed code files and web shells, firewall blocks, and unusual refunds or balance adjustments. Stays silent when nothing is wrong. Use when someone wants intrusion alerts, file-integrity monitoring or admin-login alerts on LINE for a small PHP site, shop or CMS. Also for requests in Japanese (LINEでセキュリティ通知、サイト改ざん検知、不正ログイン通知).
 license: MIT
 ---
 
@@ -25,8 +25,8 @@ dead cron job within minutes.
 Read these when you need them:
 
 - [reference/integration.md](reference/integration.md) — where each hook goes, with plain-PHP examples; how the monitor watches itself; the outside check-in; comparing the code fingerprint; `--audit` and custom rules; the optional quarantine of uploaded programs; using another channel than LINE
-- [reference/when-an-alert-arrives.md](reference/when-an-alert-arrives.md) / [繁體中文](reference/when-an-alert-arrives.zh-TW.md) — the owner's checklist: what each message means and what to do first
-- [reference/hardening-checklist.md](reference/hardening-checklist.md) / [繁體中文](reference/hardening-checklist.zh-TW.md) — the prevention side: what makes a break-in less likely in the first place
+- [reference/when-an-alert-arrives.md](reference/when-an-alert-arrives.md) / [繁體中文](reference/when-an-alert-arrives.zh-TW.md) / [日本語](reference/when-an-alert-arrives.ja.md) — the owner's checklist: what each message means and what to do first
+- [reference/hardening-checklist.md](reference/hardening-checklist.md) / [繁體中文](reference/hardening-checklist.zh-TW.md) / [日本語](reference/hardening-checklist.ja.md) — the prevention side: what makes a break-in less likely in the first place
 - [reference/line-setup.md](reference/line-setup.md) — getting a channel access token and the user/group ID
 - [examples/](examples/) — a config template and the cron entry point (`--status`, `--test`, `--test-all`, `--audit`, `--fingerprint`, `--manifest`, `--rebaseline`)
 - `scripts/selftest.php` — 170 checks, no network; `scripts/fake_line_server.php` — a local stand-in for LINE, for the check-in service and for a webhook
@@ -160,7 +160,9 @@ Preferred: cron every 5 minutes running `examples/security-alerts-cron.php` (adj
 Tell the user, in their language:
 
 - what each kind of message means and the first thing to do: give them the checklist in their
-  language ([English](reference/when-an-alert-arrives.md), [繁體中文](reference/when-an-alert-arrives.zh-TW.md))
+  language ([English](reference/when-an-alert-arrives.md), [繁體中文](reference/when-an-alert-arrives.zh-TW.md),
+  [日本語](reference/when-an-alert-arrives.ja.md); README.ja.md for a Japanese-speaking owner — the alert texts
+  themselves are English or Traditional Chinese, so say which `language` you chose)
   and ask them to keep it on their phone, not only on the server;
 - that after their own deployments they will get a "code files changed" notice — expected; after a
   big trusted deployment they can run `--rebaseline` (which is itself announced);

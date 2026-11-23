@@ -476,3 +476,4 @@ Give the owner the checklist in their language and ask them to keep it on their 
 
 - English: [when-an-alert-arrives.md](when-an-alert-arrives.md)
 - 繁體中文: [when-an-alert-arrives.zh-TW.md](when-an-alert-arrives.zh-TW.md)
+- 日本語: [when-an-alert-arrives.ja.md](when-an-alert-arrives.ja.md)

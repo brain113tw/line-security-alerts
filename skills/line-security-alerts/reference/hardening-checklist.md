@@ -4,7 +4,7 @@ This package tells you when something happened. This list is the other half: mak
 happen. You want both, because any single layer can fail.
 
 (Several items were suggested by readers after the first public release — thank you.)
-[繁體中文](hardening-checklist.zh-TW.md)
+[繁體中文](hardening-checklist.zh-TW.md) / [日本語](hardening-checklist.ja.md)
 
 ## 1. Ten minutes each — do these first
 

@@ -1,6 +1,6 @@
 # LINE Security Alerts — hear about trouble on your website, on LINE
 
-[中文](README.md)
+[中文](README.md) | [日本語](README.ja.md)
 
 Intrusion alerts for small PHP websites (online shops, booking sites, self-hosted CMSs). Silent
 while everything is normal; when something looks wrong you get one LINE message saying what
@@ -259,8 +259,8 @@ or set up several so they back each other up.
 | | LINE | Telegram | Discord |
 |---|---|---|---|
 | Cost | Free plan about 200 messages a month, then a paid plan | Free | Free |
-| Setting up | Medium: official account, Messaging API, token and user ID | Easy: ask `@BotFather` for a token, then look up the chat id | Easy: create a webhook in the channel settings, copy its address |
-| Seen at once? | In Taiwan nearly everyone has LINE open all day | The app must be installed with notifications on | The app must be installed, and this channel's notifications set to "All messages" (many servers notify only on mentions by default) |
+| Setting up | Medium: official account, Messaging API, token and user ID | Easy: ask `@BotFather` for a token, then look up the chat id | Easy: create a webhook in the server settings, copy its address |
+| Seen at once? | In Taiwan nearly everyone has LINE open all day | The app must be installed with notifications on | The app must be installed, and this channel's notifications set to "All" (many servers notify only on mentions by default) |
 | If the key leaks | Messages can be sent from your official account to everyone who added it, using up your allowance | Full control of the bot: send as it, receive what people send to it | Anything can be posted to that channel, and the webhook can be deleted (alerts then go to the next channel automatically) |
 
 Whatever you use, keep the key like the LINE token: environment variable, not version control, no screenshots.
@@ -269,7 +269,7 @@ Whatever you use, keep the key like the LINE token: environment variable, not ve
 
 1. In Telegram, find `@BotFather` (the official one, with the blue check), send `/newbot` and answer
    its questions. You get a token like `123456789:AAH…`: that is `telegram_bot_token`.
-2. On your phone, open the new bot and tap Start. For a group: add the bot to the group and send
+2. On your phone, open the new bot and tap START. For a group: add the bot to the group and send
    `/start` there.
 3. Open `https://api.telegram.org/bot<token>/getUpdates` in a browser (your token in place of `<token>`)
    and find the number after `"chat":{"id":`: that is `telegram_chat_id` (negative for a group).
@@ -278,10 +278,11 @@ Whatever you use, keep the key like the LINE token: environment variable, not ve
 
 ### Setting up Discord
 
-1. In the channel that should get the alerts: Edit Channel (gear) → Integrations → Webhooks →
-   New Webhook → Copy Webhook URL. You need the "Manage Webhooks" permission.
+1. Open Server Settings → Integrations → Create Webhook, pick the channel that should get the
+   alerts from the drop-down, then press Copy Webhook URL. You need permission to manage webhooks
+   (you have it on a server you created).
 2. Put the address into `discord_webhook_url`.
-3. On your phone, long-press the channel → Notification settings → All messages.
+3. On your phone, long-press the channel → Notification Settings → All.
 4. Run `php security-alerts-cron.php --test-all`.
 
 On Discord the message is shown in a grey code box. That keeps underscores and asterisks in file names

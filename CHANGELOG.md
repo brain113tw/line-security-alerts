@@ -17,6 +17,10 @@
 - **`--test-all`** (and `testEachChannel()`): a test message to every channel on its own, with the
   service's reason when one fails. `--status` shows the order the channels are tried in.
 - The fake server plays Telegram and Discord too (429, 500, slow, gone, too long).
+- Japanese documentation: [README.ja.md](README.ja.md), the owner's guide and the prevention checklist in
+  日本語 (translations; the alert texts themselves stay English / Traditional Chinese).
+  日本語版の説明を追加しました。
+- The "Delayed" note now says "every channel failed" instead of naming LINE and e-mail only.
 - Self-test: 204 checks.
 
 Upgrading from 1.1.x: replace `lib/SecurityAlerts.php` (and the cron entry for `--test-all` and the

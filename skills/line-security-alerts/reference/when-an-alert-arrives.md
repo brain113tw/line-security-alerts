@@ -1,7 +1,7 @@
 # When an alert arrives
 
 For the owner or manager of the site. No programming knowledge needed. Print it, or keep it in the
-notes app on your phone. ([中文版](when-an-alert-arrives.zh-TW.md))
+notes app on your phone. ([中文版](when-an-alert-arrives.zh-TW.md) / [日本語](when-an-alert-arrives.ja.md))
 
 ## Three things first
 
