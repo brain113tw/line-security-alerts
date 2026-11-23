@@ -14,6 +14,14 @@
 //                                              (once after installing: the first run trusts what is already there)
 //   php security-alerts-cron.php --fingerprint the code fingerprint from the weekly check-in, checked against the disk
 //   php security-alerts-cron.php --manifest    every code file with its SHA-256, in sha256sum format
+//   php security-alerts-cron.php --expect 30m  "we are about to upload an update": runs every check first, then for
+//                                              30 minutes (or 2h; at most 4h) ordinary code-file changes are summed up
+//                                              in ONE message afterwards. Backdoor-like content, programs in upload
+//                                              folders and hidden edits are still reported at once.
+//   php security-alerts-cron.php --expect off  the update is done: close the window now and send the summary
+//   php security-alerts-cron.php --pages       read the pages in page_watch now, the four ways, and list the other
+//                                              sites each one uses; marks what only search engines / visitors from
+//                                              Google get (once after setting it up: the first check trusts what is there)
 //
 // Refuses to run from a browser.
 
@@ -31,6 +39,7 @@ $arg = isset($argv[1]) ? $argv[1] : '';
 
 if ($arg === '--status')
 {
+    $alerts->lineFriendCount();   // asks LINE how many people the alert account reaches (remembered; status() reports it)
     $s = $alerts->status(10);
     $at = function ($t) { return $t ? date('Y-m-d H:i', $t) : 'never'; };
     $ago = function ($t) use ($s) {
@@ -54,6 +63,7 @@ if ($arg === '--status')
     echo '  alerts go to      : ' . $path($d['route']['notice']) . ($d['mail'] ? '' : '  (no e-mail fallback)') . "\n";
     if ($d['route']['urgent'] !== $d['route']['notice']) { echo '  urgent ones       : ' . $path($d['route']['urgent']) . '  (line_min_level ' . $d['line_min_level'] . ")\n"; }
     if ($d['route']['checkin'] !== $d['route']['notice']) { echo '  check-in goes to  : ' . $path($d['route']['checkin']) . "\n"; }
+    if ($s['line_friends'] !== null) { echo '  LINE account      : about ' . $s['line_friends']['n'] . " friend(s) can receive its messages\n"; }
     echo '  sent today        : ' . $s['sent_today'] . ' of ' . $s['daily_cap'] . " (urgent ones are not limited)\n";
     echo '  waiting to re-send: ' . $s['waiting']['count'] . ($s['waiting']['count'] ? ', oldest from ' . $at($s['waiting']['oldest']) : '') . "\n";
     if ($s['files']['scan'])
@@ -67,6 +77,13 @@ if ($arg === '--status')
     {
         echo "  code files        : not scanned\n";
     }
+    if ($s['expect'] !== null)
+    {
+        echo '  update window     : ' . ($s['expect']['open'] ? 'OPEN until ' . date('H:i', $s['expect']['until']) : 'ended ' . date('H:i', $s['expect']['until']) . ', summary goes with the next run')
+            . '; so far ' . $s['expect']['new'] . ' new, ' . $s['expect']['changed'] . ' changed, ' . $s['expect']['deleted'] . " deleted\n";
+    }
+    $pg = $s['pages'];
+    echo '  pages watched     : ' . ($pg['watched'] ? $pg['watched'] . ', last read ' . $at($pg['last_check']) : 'none (page_watch)') . "\n";
     echo '  weekly check-in   : ' . ($s['checkin']['every_days'] > 0 ? 'next one due ' . $at($s['checkin']['next_due']) : 'off')
         . '; since ' . $at($s['checkin']['counting_since']) . ': ' . $s['checkin']['runs'] . ' checks, ' . $s['checkin']['reported'] . ' reported, ' . $s['checkin']['urgent'] . " urgent\n";
     echo '  outside check-in  : ' . $ping . "\n";
@@ -95,8 +112,73 @@ if ($arg === '--test-all')
         echo '  ' . str_pad($ch === 'custom' ? 'notifier' : $ch, 9) . ($res['ok'] ? 'sent' : 'FAILED: ' . $res['why']) . "\n";
     }
     if (!$all) { echo "  no channel is set up\n"; }
+    $friends = $alerts->lineFriendCount();
+    if ($friends !== null)
+    {
+        $defaults = SecurityAlerts::defaults();
+        echo '  LINE account: about ' . $friends . ' friend(s)' . ($friends > (int) (isset($config['line_friends_warn']) ? $config['line_friends_warn'] : $defaults['line_friends_warn'])
+            ? ' - too many for an alert account: its key is on this server, and whoever breaks in could message all of them. Use an official account of its own.'
+            : '') . "\n";
+    }
     $bad = count(array_filter($all, function ($res) { return !$res['ok']; }));
     exit(!$all || $bad ? 1 : 0);
+}
+if ($arg === '--expect')
+{
+    $v = isset($argv[2]) ? strtolower($argv[2]) : '';
+    if ($v === 'off' || $v === 'done' || $v === 'end')
+    {
+        if (!$alerts->endExpect())
+        {
+            echo "no update window is open\n";
+            exit(0);
+        }
+        $r = $alerts->run();
+        echo date('Y-m-d H:i:s') . ' update window closed; summary: ' . (isset($r['sent']) ? $r['sent'] : json_encode($r)) . "\n";
+        exit(0);
+    }
+    if (!preg_match('/^(\d+)(m|min|h)?$/', $v, $m))
+    {
+        echo "usage: --expect 30m | 2h | off   (at most 4 hours)\n";
+        exit(2);
+    }
+    $minutes = (int) $m[1] * (isset($m[2]) && $m[2] === 'h' ? 60 : 1);
+    $r = $alerts->expectChanges($minutes);
+    if (!$r['ok'])
+    {
+        echo 'not opened: ' . $r['why'] . "\n";
+        exit(1);
+    }
+    echo date('Y-m-d H:i:s') . ' ' . ($r['run'] === null ? 'update window extended' : 'checked everything first (' . json_encode($r['run']) . '); update window open')
+        . ' until ' . date('H:i', $r['until']) . ".\n"
+        . "  Ordinary code-file changes until then come as ONE summary afterwards. Backdoor-like content, programs in\n"
+        . "  upload folders and hidden edits are still reported at once. Done early? --expect off\n";
+    exit(0);
+}
+if ($arg === '--pages')
+{
+    $names = array('browser' => 'desktop browser', 'mobile' => 'phone', 'crawler' => 'Google crawler', 'from_google' => 'phone from Google');
+    $all = $alerts->pagesNow();
+    foreach ($all as $url => $p)
+    {
+        echo $url . "\n";
+        foreach ($p['views'] as $v => $cats)
+        {
+            if (is_string($cats)) { echo '  ' . str_pad($names[$v], 18) . ' could not be read: ' . $cats . "\n"; }
+        }
+        foreach (array('script' => 'code from', 'frame' => 'embeds', 'form' => 'forms send to', 'redirect' => 'redirects to', 'link' => 'links to') as $cat => $words)
+        {
+            if (!empty($p['outside'][$cat])) { echo '  ' . str_pad($words, 18) . ' ' . implode(', ', $p['outside'][$cat]) . "\n"; }
+        }
+        foreach ($p['only_bots'] as $cat => $hosts)
+        {
+            echo '  !! ONLY search engines / visitors from Google get (' . $cat . '): ' . implode(', ', $hosts) . "\n";
+        }
+        if (!$p['only_bots']) { echo "  everybody gets the same outside sites.\n"; }
+    }
+    if (!$all) { echo "page_watch is empty: nothing to read\n"; }
+    echo "This site and the sites in page_allow are left out. Anything you do not recognise: ask your developer before it becomes the baseline.\n";
+    exit(0);
 }
 if ($arg === '--rebaseline')
 {

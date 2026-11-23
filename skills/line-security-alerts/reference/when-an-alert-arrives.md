@@ -139,6 +139,54 @@ files were converted quietly.
 - Ask the staff member named in the message. The end of a promotion or a compensation round looks like this.
 - **They say it was not them**: treat their account as stolen (see "new device" above) and check each of those transactions.
 
+## 【URGENT】 A page started using another site
+
+(Only if your developer set up the "page watch".)
+
+**Meaning**: one of your pages now loads code from a site it did not use before, embeds one, sends
+what customers type in a form to one, or sends visitors on to one. Site names are written like
+`cdn-evil[.]example` on purpose: **do not open them**.
+
+**Do**
+
+- Ask your developer and staff: did anyone add a chat box, a payment, analytics or advertising service
+  today? If yes, and the name matches, fine — your developer adds it to the allowed list.
+- **Nobody added anything**: assume someone changed your site's settings or database to read
+  customers' card details or send them elsewhere. If the page takes payments or personal details,
+  have your developer take that page (or the shop) offline now, find where the code comes from (often
+  a "footer / header code" setting or an article) and remove it, then follow "Possible backdoor"
+  above: passwords, how they got in, which customers may be affected.
+
+## 【URGENT】 Your pages show search engines something you do not see
+
+**Meaning**: Google's crawler, or customers arriving from a Google search, get links or a redirect
+that you do not see when you open the site yourself. This is how gambling and spam-link injections
+hide from shop owners; the site may soon show up in Google with casino titles, or Google may warn
+visitors away from it.
+
+**Do**
+
+- Do not try the links. Have your developer search the database (articles, settings, footer) and the
+  code for the names in the message and remove what they find, then follow "Possible backdoor" above.
+- After cleaning up, have them check Google Search Console ("Security issues") and ask Google to
+  review the site.
+
+## 【Notice】 New links to other sites on your pages
+
+**Meaning**: a watched page now links to a site it did not link to before, and everybody sees it.
+
+**Do**: did you or your staff add an article, a partner, a social link? Then ignore it. If nobody did,
+look at that page with your developer: links can be slipped in the same way as the hidden ones above.
+
+## 【Notice】 Code changes during your announced update
+
+**Meaning**: before uploading an update, your developer ran `--expect`. During that time the code
+changes were collected instead of reported one by one; this message lists them.
+
+**Do**: was there really an update at the time shown? Then nothing to do. **If nobody was updating
+the site then**, someone on the server announced the window to hide their changes: follow "Possible
+backdoor" above.
+
 ## A message that starts with "⏱ Delayed: this alert is from …"
 
 **Meaning**: this is about something that happened earlier. At that moment no channel could be
@@ -189,6 +237,15 @@ to customers included.
   included. Do one or both: raise the plan in the LINE Official Account Manager; have your developer
   make sure a second channel is set (e-mail, Telegram or Discord: alerts go there when LINE refuses).
   Telegram and Discord are free; with `line_min_level => 2` LINE is kept for urgent alerts only.
+
+### An extra line: "⚠ The LINE account that sends these alerts has about N friends"
+
+**Meaning**: the alerts come from an official account that many people follow — probably the one
+your customers use. Its key is stored on your web server; if the server is ever broken into, the
+intruder could send a message from your shop's account to all of those people.
+
+**Do**: create a new LINE Official Account used only for alerts (you and a few colleagues as friends)
+and have your developer switch the alerts to it. Keep the customer account for customers.
 
 ### An extra line: "⚠ The outside check-in address has failed…"
 

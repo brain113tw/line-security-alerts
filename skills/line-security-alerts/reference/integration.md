@@ -225,6 +225,9 @@ register_shutdown_function(function () {
 | `findings.ndjson` | every finding with its delivery status (`line`, `mail`, `custom`, `failed`, `capped`, `logged`) |
 | `state.json` | last run, quiet-window keys, daily counter, known devices, admin snapshot fingerprints, alerts waiting to be re-sent |
 | `files.json` | size / mtime / ctime / SHA-256 / pattern ids per code file |
+| `pages.json` | page watch: per page, the outside sites seen (by category, with when each was first seen) and failed reads in a row |
+| `expect.json` | an announced update window (`--expect`) and the changes collected in it; removed when its summary is sent |
+| `line-friends.json` | the last answer to "how many friends does the alert account have" |
 | `.htaccess`, `index.html` | deny-all for Apache, empty index |
 
 The check-in address (`ping_url`) is not written to any of them.
@@ -234,10 +237,13 @@ The check-in address (`ping_url`) is not written to any of them.
 `php security-alerts-cron.php --status` (or `$alerts->status()` from code) answers that without
 sending or changing anything: last run, where alerts go, messages sent today, alerts waiting to be
 re-sent, files watched with the last scan and the last full re-read, the current code fingerprint next
-to the one in the last check-in, the outside check-in, and the latest findings with how each was
-delivered. Lines starting with `!!` need a look (no run for a while, nowhere to send to, no fallback
-e-mail, alerts stuck, check-in address failing…); the exit code is 1 when there is at least one. The
-token, the recipient ids and the check-in address are never printed.
+to the one in the last check-in, the outside check-in, an open update window, the pages watched, the
+LINE account's friend count, and the latest findings with how each was delivered. Lines starting with
+`!!` need a look (no run for a while, nowhere to send to, no fallback e-mail, alerts stuck, check-in
+address failing, a page view failing again and again, an alert account with many friends…); the exit
+code is 1 when there is at least one. The token, the recipient ids and the check-in address are never
+printed. The command-line `--status` asks LINE for the friend count first (one GET); `status()` itself
+only reads what is on disk.
 
 ### LINE's monthly allowance
 
@@ -470,7 +476,102 @@ Messages sent through any chat channel (yours included) count towards `daily_cap
 Try yours against `scripts/fake_line_server.php` (`POST /hook/anything`) before pointing it at the
 real service.
 
-## 14. When an alert arrives
+**Which LINE account.** The channel access token lives on the web server; whoever breaks in can read
+it and push to every friend of that official account. Use an account made only for alerts (the owner
+and a few colleagues as friends), never the one customers follow — a site that already sends order
+messages through LINE has that token nearby, and it is the wrong one. `lineFriendCount()` asks LINE
+(`GET /v2/bot/insight/followers?date=…`, yesterday in Japan time, friends minus blocks; LINE needs
+about a day to count a date, so up to three days are tried) and remembers the answer. `--status`,
+`--test-all` and the weekly check-in use it and warn above `line_friends_warn` (20; 0 = never ask).
+The figure is approximate: LINE counts people who ever added the account, minus current blocks.
+
+## 14. Page watch: what the database can change without touching a file
+
+```php
+'page_watch' => array('https://example.com/', 'https://example.com/product/12', 'https://example.com/cart'),
+'page_allow' => array('googletagmanager.com', 'payment-provider.example'),   // sub-domains included
+// 'page_watch_hours' => 1, 'page_links' => true, 'page_timeout' => 10, 'page_max_bytes' => 2097152,
+```
+
+Many break-ins leave every file alone and change content in the database: a skimming script in a
+"footer code" setting, spam links in an article, a redirect for visitors who arrive from Google. Every
+`page_watch_hours` the scheduled job reads each page four ways — a desktop browser, a phone, Google's
+smartphone crawler (the user agent Google documents), and a phone with `Referer: https://www.google.com/`
+— and extracts the **other** sites the page uses, by category:
+
+| Category | Taken from |
+|---|---|
+| script | `<script src>`, `<link rel="modulepreload">` / `rel="preload" as="script"`, and addresses written inside inline scripts (what a loader script will fetch; `https:\/\/` in JSON form too). JSON-LD and other non-code `<script type>`s are skipped |
+| frame | `<iframe src>`, `<frame src>`, `<embed src>`, `<object data>` |
+| form | `<form action>`, `formaction` on buttons and inputs |
+| redirect | a `Location` to another site (redirects within the site are followed, at most 5), `<meta http-equiv="refresh">` |
+| link | `<a href>`, `<area href>` |
+
+Addresses are read the way a browser reads them: tabs and line breaks dropped, `\` taken as `/`, a
+`user@` part skipped, `data:` recognised (shown as "code written into the page itself"). This site's
+own host, the same name without `www.`, and its sub-domains are left out; so are comments, `<style>`,
+`mailto:`, `tel:` and `javascript:`. The page is split with a plain left-to-right walk, not one big
+regular expression, so a page with a huge inline script cannot make the parser give up and the page
+look empty.
+
+The first successful read of a page is its baseline (nothing sent). After that, per page:
+
+| Found | Level | Message |
+|---|---|---|
+| A site that the crawler or Google visitors get but neither the desktop browser nor the phone does (same category) | URGENT | "Your pages show search engines something you do not see" |
+| A new site for script, frame, form or redirect | URGENT | "A page started using another site" |
+| A new site among the links | Notice (`page_links => false` to skip) | "New links to other sites on your pages" |
+
+Sites in `page_allow` are never reported. Each new site is reported once and then becomes part of the
+record (at most 500 per category and page). Site names in messages are written `name[.]com` because
+chat apps turn bare domains into links. The phone view is there so that a phone-only layout (a chat
+button only on mobile) is not mistaken for hiding; the comparison needs both the browser and the phone
+view to have answered.
+
+Limits, to tell the user:
+
+- It runs only from the command line (the cron job). From `tick()` inside a page view it does
+  nothing — reading your own site from inside a request can tie up the server — and `--status` says
+  so if that is the only way the checks run.
+- A page that cannot be read (5xx, timeout) is not an alert — uptime belongs to an uptime monitor —
+  but `--status` lists a view that failed 3 times in a row. A firewall that blocks fake Google
+  crawlers makes the crawler view fail every time; the other three still work.
+- Some injections show spam only to Google's real IP addresses; a user agent cannot fake that. Google
+  Search Console's "Security issues" report covers it.
+- Pages behind a login (the checkout after the address step, the member area) cannot be watched.
+- Pick stable pages. A list that gains links to new articles every day will report every one of them.
+
+`php security-alerts-cron.php --pages` (`pagesNow()`) reads every page now, all four ways, lists the
+outside sites per category and marks with `!!` what only the crawler or Google visitors get. Nothing
+is sent or saved. Run it once after setting `page_watch`, because the first check trusts what is
+there. `scripts/fake_line_server.php` has a shop at `/shop/` that `/shop/hack` turns into a hacked one
+(an inline loader for a skimming script, links only for the crawler, Google visitors redirected) and
+`/shop/clean` back.
+
+## 15. Announcing your own updates (`--expect`)
+
+```
+php security-alerts-cron.php --expect 30m     # 30m, 90, 2h … at most 4 hours
+php security-alerts-cron.php --expect off     # done: close now and send the summary
+```
+
+`expectChanges($minutes)` first runs every check with a file scan (whatever changed before the
+announcement is reported as usual, so it cannot slip into the window), then opens a window. Inside it,
+plain new / changed / deleted code files are collected instead of reported; the first run after the
+window ends scans at once and sends ONE Notice — "Code changes during your announced update", the
+window's times, the counts and up to five names. A window with no changes ends quietly (log only).
+Announcing again while a window is open extends it. `endExpect()` closes it early.
+
+Never collected, always reported at once: content matching a suspicious rule, any program inside
+`upload_dirs`, and a change whose modification time was put back. A window ends at most 4 hours after
+it opened whatever `expect.json` says (an intruder could write one "until 2099"), and the summary tells
+the owner to treat it as a break-in if nobody was updating. The weekly check-in waits while a window is
+open, so a changed fingerprint is never shown without the summary that explains it.
+
+If the scan cannot finish within `scan_time_budget` in one go, `--expect` refuses to open the window
+(it would let unread changes count as expected) and asks to try again a few minutes later.
+
+## 16. When an alert arrives
 
 Give the owner the checklist in their language and ask them to keep it on their phone:
 

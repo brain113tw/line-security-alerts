@@ -16,7 +16,10 @@ return array(
        (Apache); on nginx add:  location ^~ /path/to/state { deny all; }  */
     'state_dir' => __DIR__ . '/../var/security-alerts',
 
-    /* LINE Messaging API. Prefer environment variables (or a file outside the web root) over literals. */
+    /* LINE Messaging API. Prefer environment variables (or a file outside the web root) over literals.
+       Use an official account made ONLY for these alerts, not the one your customers follow: the key lives on
+       this server, and whoever breaks in can message every friend of that account. --status and the weekly
+       check-in warn when the account has more than line_friends_warn (20) friends. */
     'line_channel_access_token' => (string) getenv('LINE_ALERT_TOKEN'),
     'line_to'                   => array_filter(explode(',', (string) getenv('LINE_ALERT_TO'))),   // "Uxxxxxxxx…" (you) or "Cxxxxxxxx…" (a group)
     // 'line_api_base'         => 'http://127.0.0.1:8765',   // the fake server in scripts/, for trying things out
@@ -48,6 +51,15 @@ return array(
        the server stops running it. Only that: nothing outside upload_dirs, nothing that was already there,
        no .htaccess. Run without it for a while first and make sure upload_dirs is right. */
     // 'quarantine_uploads' => true,
+
+    /* Optional page watch: a few of your own pages, read once an hour the way a desktop browser, a phone,
+       Google's crawler and a visitor arriving from a Google search see them. It reports a NEW outside site for
+       scripts, frames, form targets or redirects (card skimming, redirects), anything only the crawler or
+       Google visitors get (gambling / spam-link injections), and new outside links. These hide in the
+       database, where the file scan cannot see them. Pick stable pages (home, a product, the cart), not ones
+       whose links change every day. Runs from the scheduled job only. After setting it, run --pages once. */
+    // 'page_watch' => array('https://example.com/', 'https://example.com/cart'),
+    // 'page_allow' => array('googletagmanager.com', 'your-payment-provider.example'),   // sub-domains included
 
     /* The monitor watching itself.
        - Once a week it says "still on duty" (0 = never) and prints one fingerprint of all code files, so

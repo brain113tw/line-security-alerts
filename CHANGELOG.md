@@ -1,5 +1,32 @@
 # Changelog / 更新紀錄
 
+## 1.3.0 — 2026-11-23
+
+- **Page watch** (`page_watch`, optional): a few of your own pages are read every hour four ways — a
+  desktop browser, a phone, Google's crawler, a phone arriving from a Google search — and the other
+  sites they use are compared with last time. URGENT: a new site for scripts, frames, form targets or
+  redirects (card skimming, redirects), and anything only the crawler or Google visitors get (spam
+  links hidden from the owner). Notice: new outside links. These changes usually live in the database,
+  where the file scan cannot see them. `page_allow` for services you use on purpose; `--pages` lists
+  what each page uses right now. Site names in messages are written `name[.]com`.
+  網頁監看：資料庫裡被塞的側錄程式、只給 Google 看的垃圾連結、從 Google 點進來被轉走，檔案比對看不到的這些現在也會通知。
+- **Announced updates**: `--expect 30m` runs every check first, then collects ordinary code changes
+  for that time and sends ONE summary afterwards (`--expect off` to finish early). Backdoor-like
+  content, programs in upload folders and edits with the time put back are still reported at once; a
+  window lasts 4 hours at most, whatever its file says.
+  上傳更新前先預告，更新的變動合成一則；像後門的東西照樣立刻通知。
+- **The LINE key on the server**: `--status`, `--test-all` and the weekly check-in ask LINE roughly how
+  many friends the alert account has and warn above `line_friends_warn` (20). If the server is broken
+  into, that key can message every friend: alerts belong in an account of their own. The docs now say
+  so plainly.
+  提醒通知要用專用的 LINE 帳號：金鑰在主機上，被偷就能發訊息給所有好友。
+- The fake server has a shop (`/shop/`, `/shop/hack`) and answers LINE's friend-count question.
+- Self-test: 245 checks.
+
+Upgrading from 1.2.x: replace `lib/SecurityAlerts.php` and the cron entry (for `--expect`, `--pages`
+and the new `--status` lines). Nothing else changes until you set `page_watch`; the friend-count
+question is a GET to LINE once a week (`'line_friends_warn' => 0` turns it off).
+
 ## 1.2.0 — 2026-11-23
 
 - **Telegram and Discord built in.** `telegram_bot_token` + `telegram_chat_id`, `discord_webhook_url`.

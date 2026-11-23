@@ -8,8 +8,11 @@ Screens change over time; if a step does not match, look for the same words in t
 
 ## 1. An official account with the Messaging API
 
-1. Create a LINE Official Account (LINE Official Account Manager). A separate account just for
-   alerts is cleanest — customers never see it.
+1. Create a LINE Official Account (LINE Official Account Manager) **only for these alerts** — never
+   reuse the account your customers follow. The token will sit on the web server; if the server is
+   broken into, whoever reads it can message every friend of that account. On an alerts-only account
+   that is you and a few colleagues. `--status`, `--test-all` and the weekly check-in ask LINE roughly
+   how many friends the account has and warn above `line_friends_warn` (20).
 2. In the Official Account Manager: **Settings → Messaging API → Enable**, and choose or create a
    provider. This creates the Messaging API channel in the LINE Developers console.
 3. Optional but recommended: in the Official Account Manager turn **off** auto-reply and greeting

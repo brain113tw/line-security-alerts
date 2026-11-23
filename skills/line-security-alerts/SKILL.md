@@ -1,6 +1,6 @@
 ---
 name: line-security-alerts
-description: Add "something looks wrong" security alerts to a PHP website, pushed to the owner's LINE (Telegram and Discord built in too, with e-mail fallback). Covers failed or new-device admin logins, admin account changes, new/changed code files and web shells, firewall blocks, and unusual refunds or balance adjustments. Stays silent when nothing is wrong. Use when someone wants intrusion alerts, file-integrity monitoring or admin-login alerts on LINE for a small PHP site, shop or CMS. Also for requests in Japanese (LINEでセキュリティ通知、サイト改ざん検知、不正ログイン通知).
+description: Add "something looks wrong" security alerts to a PHP website, pushed to the owner's LINE (Telegram and Discord built in too, with e-mail fallback). Covers failed or new-device admin logins, admin account changes, new/changed code files and web shells, firewall blocks, unusual refunds or balance adjustments, and pages that start loading code, sending forms or linking to other sites (card skimming, spam links shown only to Google). Stays silent when nothing is wrong. Use when someone wants intrusion alerts, file-integrity monitoring, defacement or SEO-spam detection, or admin-login alerts on LINE for a small PHP site, shop or CMS. Also for requests in Japanese (LINEでセキュリティ通知、サイト改ざん検知、不正ログイン通知).
 license: MIT
 ---
 
@@ -28,8 +28,8 @@ Read these when you need them:
 - [reference/when-an-alert-arrives.md](reference/when-an-alert-arrives.md) / [繁體中文](reference/when-an-alert-arrives.zh-TW.md) / [日本語](reference/when-an-alert-arrives.ja.md) — the owner's checklist: what each message means and what to do first
 - [reference/hardening-checklist.md](reference/hardening-checklist.md) / [繁體中文](reference/hardening-checklist.zh-TW.md) / [日本語](reference/hardening-checklist.ja.md) — the prevention side: what makes a break-in less likely in the first place
 - [reference/line-setup.md](reference/line-setup.md) — getting a channel access token and the user/group ID
-- [examples/](examples/) — a config template and the cron entry point (`--status`, `--test`, `--test-all`, `--audit`, `--fingerprint`, `--manifest`, `--rebaseline`)
-- `scripts/selftest.php` — 170 checks, no network; `scripts/fake_line_server.php` — a local stand-in for LINE, for the check-in service and for a webhook
+- [examples/](examples/) — a config template and the cron entry point (`--status`, `--test`, `--test-all`, `--audit`, `--pages`, `--expect 30m` / `--expect off`, `--fingerprint`, `--manifest`, `--rebaseline`)
+- `scripts/selftest.php` — 245 checks, no network; `scripts/fake_line_server.php` — a local stand-in for LINE, Telegram, Discord, the check-in service, a webhook, and a small shop that can be switched to "hacked" (`/shop/hack`) for trying the page watch
 - `scripts/fingerprint.php` — the code fingerprint of any folder, to compare a clean local copy with the one the server reports
 - `scripts/demo.php` — replays a few days at a small shop and prints the exact messages the owner
   would get (`--lang=zh-TW`, `--site="Their shop"`). Run it and show the output when the user asks
@@ -60,13 +60,23 @@ Find and note, with file paths:
 8. **Secrets handling**: does the project already keep secrets in environment variables or in a
    config file outside version control? Use the same place for the LINE token (and the Telegram
    token or Discord webhook address, if the user wants one of those).
-10. **Channel**: LINE, Telegram, Discord, or several? Show the user the comparison in the README
+9. **Channel**: LINE, Telegram, Discord, or several? Show the user the comparison in the README
    (cost, setup, whether they will see it at once, what a leaked key allows). For a Taiwanese shop
    owner LINE is usually the one they see first; Telegram or Discord can carry the routine messages
    with `line_min_level => 2`. Let them create the bot or webhook themselves.
-9. **Outside monitoring**: does the user already use a cron-monitoring / uptime service? If so, its
+   **For LINE, ask which official account they mean to use.** If it is the one their customers follow
+   (it already has a token because the site sends order messages, say), explain why alerts need an
+   account of their own: the token lives on the server, and whoever breaks in could message every
+   customer. Recommend a new, alerts-only account; the module warns about one with more than 20 friends.
+10. **Outside monitoring**: does the user already use a cron-monitoring / uptime service? If so, its
    check-in address can go into `ping_url`. If not, mention the option and let the user decide and
    sign up themselves.
+11. **Pages worth watching** (optional `page_watch`): content kept in the database (articles, footer or
+   header settings, widgets, "extra code" fields) can be changed without touching a file. Suggest two
+   or three stable pages: the home page, one product page, the cart or checkout page if it can be
+   opened without logging in. Not news lists that gain new outside links every day. Note the outside
+   services the pages use on purpose (analytics, chat, payment) for `page_allow`, but only the ones
+   the user recognises.
 
 ### 2. Install the library
 
@@ -91,6 +101,8 @@ Find and note, with file paths:
   `rehash_days` at 7 (the weekly full re-read of every file).
 - `input_charset`: only if the survey found file or account names that are not UTF-8 (old sites with
   Big5 / GBK / Latin-1 names). Then also run the self-test on the server itself.
+- `page_watch` / `page_allow`: from step 1.11, if the user wants it. Only the user's own pages, never
+  someone else's site. It runs from the cron job only (not from `tick()` in a page view).
 
 ### 3. Add the hooks
 
@@ -144,6 +156,12 @@ Preferred: cron every 5 minutes running `examples/security-alerts-cron.php` (adj
    through every listed file with the user: open it, say what it is, and decide together. Expect
    legitimate hits (libraries that run commands, old code that builds functions at run time). Do not
    delete, move or "clean" anything on your own — a suspicious file is evidence; report it.
+   With `page_watch`, do the same for the pages: `php security-alerts-cron.php --pages` lists the
+   outside sites each page uses, read four ways, and marks with `!!` what only search engines or
+   visitors from Google get. Go through the list with the user; anything they do not recognise
+   (especially an `!!` line, a script from an unknown site, a form sending elsewhere) is looked at
+   before the first run turns it into the baseline. Locally, `/shop/` on the fake server plays a site
+   that can be switched to "hacked".
 6. Check the cron log after the first scheduled runs: each line is a JSON summary. With `ping_url`
    set it must contain `"ping":"ok"`, and the user should see the check turn green on the service's
    own page. To try the check-in without a real service, point `ping_url` at the fake server
@@ -153,7 +171,8 @@ Preferred: cron every 5 minutes running `examples/security-alerts-cron.php` (adj
 8. `php security-alerts-cron.php --status` must end with "nothing needs a look" (or only with lines
    you have explained to the user, such as a missing fallback e-mail). Use the same command first
    whenever the user later asks whether the alerts still work; it never prints a token, a recipient
-   or chat id, a webhook or the check-in address. It shows the order the channels are tried in.
+   or chat id, a webhook or the check-in address. It shows the order the channels are tried in and
+   roughly how many friends the LINE account has (`!!` above 20: see step 1.9).
 
 ### 6. Hand-over to the user
 
@@ -164,8 +183,14 @@ Tell the user, in their language:
   [日本語](reference/when-an-alert-arrives.ja.md); README.ja.md for a Japanese-speaking owner — the alert texts
   themselves are English or Traditional Chinese, so say which `language` you chose)
   and ask them to keep it on their phone, not only on the server;
-- that after their own deployments they will get a "code files changed" notice — expected; after a
-  big trusted deployment they can run `--rebaseline` (which is itself announced);
+- that after their own deployments they will get a "code files changed" notice — expected. Better:
+  run `--expect 30m` before uploading (and `--expect off` when done): the changes then come as one
+  summary, while anything backdoor-like is still reported at once. In a deploy script, put those two
+  around the upload. After a big trusted deployment they can also run `--rebaseline` (itself announced);
+- with `page_watch`: what the three page alerts mean (a new outside script / form target / redirect;
+  something only search engines or Google visitors get; new outside links), that site names are
+  written as `name[.]com` on purpose, and that adding a service of their own means one alert, after
+  which the site goes into `page_allow`;
 - that once a week they get a short "still on duty" message, and that a week WITHOUT it means the
   checks have stopped and they should call you or their developer;
 - that the weekly message ends with a "code fingerprint" and says whether it equals last week's.
@@ -195,6 +220,10 @@ Tell the user, in their language:
 - The module only reports. Do not add automatic deletion or IP blocking on your own initiative: a
   false positive would take the site down or lock the owner out. If the user asks for that, explain
   the risk first and build it as a separate, reversible step.
+- `page_watch` lists the user's own pages only. Do not put a site into `page_allow` that the user has
+  not recognised as theirs: the allow list is exactly where an injected skimmer would want to be.
+- `--expect` is for the user's own announced updates. Do not open a window to make your own test
+  changes look quiet; say what you are about to change instead.
 - `quarantine_uploads` (rename new program files that appear in upload folders) stays OFF unless the
   user asks for it. Before turning it on: confirm `upload_dirs` with the user, check that the site
   itself never writes program files there (look at past alerts and at the folders), and tell them

@@ -13,6 +13,14 @@
  *   4. Firewall / rate limiter: too many blocked requests in an hour.
  *   5. Money: a burst of manual refunds, cancelled paid orders or manual balance adjustments,
  *      or a single unusually large one.
+ *   6. Your pages, read from outside (optional): a script, frame or form target from a site that was not
+ *      there before, a redirect away, new links to other sites, and links or scripts that only search
+ *      engines or visitors coming from Google are shown. These are changes made in the database or the
+ *      settings, which the file scan cannot see.
+ *
+ * Announcing your own updates: `expectChanges()` (`--expect 30m` on the command line) opens a window in which
+ * ordinary code-file changes are summed up in one message afterwards instead of a notice per scan. Anything
+ * that looks like a backdoor is still reported at once.
  *
  * Design rules
  *   - Your application calls tiny "hooks" (loginFailed(), firewallBlocked(), …) that only append
@@ -50,6 +58,8 @@ final class SecurityAlerts
     private $ruleLabels = array();
     /** @var array  ids of extra rules that were dropped (not a valid pattern) */
     private $badRules = array();
+    /** @var bool  the next run scans the files whether or not a scan is due (set by expectChanges()) */
+    private $forceScan = false;
 
     public static function defaults()
     {
@@ -79,6 +89,12 @@ final class SecurityAlerts
                With 1 or 2 the messages LINE does take are tried on LINE first. When no other channel is set up,
                everything still goes to LINE rather than nowhere (and --status points it out). */
             'line_min_level'     => 0,
+            /* The LINE key sits on this server. If the server is broken into, whoever reads it can message every
+               friend of that official account: with the account your customers follow, that is all of them.
+               Once a week (and on --status / --test-all) the module asks LINE roughly how many friends the
+               account has, and above this number it warns: alerts belong in an account of their own.
+               0 = do not ask. */
+            'line_friends_warn'  => 20,
 
             /* Telegram (optional): a bot token from @BotFather and the chat to write to (a number, negative for a
                group; one id or an array). Sent as plain text without link previews. The token gives full control
@@ -162,6 +178,22 @@ final class SecurityAlerts
             'extra_rules'        => array(),
             'disable_rules'      => array(),       // ids of built-in rules to switch off (see suspiciousRules())
 
+            /* Page watch (optional). Many break-ins on small shops change no file at all: card-skimming code is
+               added to a footer setting, gambling links to an article, a redirect for visitors coming from Google
+               to the database. So every `page_watch_hours` these pages are read four ways (a desktop browser, a
+               phone, Google's crawler, a phone arriving from a Google search) and the sites they pull code from,
+               embed, send forms to, redirect to and link to are compared with what was there before.
+               Reported: a NEW site for scripts, frames, form targets or redirects (URGENT); anything that only the
+               crawler or Google visitors are shown (URGENT: that is how spam injections hide from the owner);
+               new links to other sites (Notice). The first check records what is there and sends nothing.
+               Runs only from the scheduled job (command line), never inside a visitor's page view. */
+            'page_watch'         => array(),       // full addresses of your own pages, e.g. array('https://example.com/', 'https://example.com/cart')
+            'page_watch_hours'   => 1,
+            'page_allow'         => array(),       // other sites your pages use on purpose, e.g. 'googletagmanager.com' (sub-domains included)
+            'page_links'         => true,          // false = do not report plain new links (scripts, forms, redirects and hidden-from-you content still are)
+            'page_timeout'       => 10,            // seconds per request
+            'page_max_bytes'     => 2097152,
+
             /* Your own channel (Slack, ntfy, SMS…): function(string $text, int $level): bool.
                Tried first; when it returns false (or is not set) the message goes on to Telegram, Discord, LINE,
                then e-mail. */
@@ -170,6 +202,7 @@ final class SecurityAlerts
             /* Dependency injection (tests, custom HTTP / mail) */
             'transport'          => null,          // function(string $url, array $headers, string $body, string $method = 'POST'): array(int $status, string $body)
             'ping_transport'     => null,          // function(string $url, int $timeout): int $status
+            'page_transport'     => null,          // function(string $url, array $headers, int $timeout): array(int $status, string $body, string $location)
             'renamer'            => null,          // function(string $from, string $to): bool  (used by quarantine_uploads)
             'mailer'             => null,          // function(string $to, string $subject, string $text, string $from): bool
             'clock'              => null,          // function(): int
@@ -312,6 +345,8 @@ final class SecurityAlerts
                 $scan = $this->checkFiles($state, $now);
                 $findings = array_merge($findings, $scan['findings']);
             }
+            $pages = $this->checkPages($state, $now);
+            $findings = array_merge($findings, $pages['findings']);
 
             $state['last_run'] = $now;
             $sent = $this->dispatch($findings, $state, $now);
@@ -324,7 +359,7 @@ final class SecurityAlerts
             $ping = $this->ping($state, $now);
 
             return array('findings' => count($findings), 'sent' => $sent, 'file_scan' => $scan['ran'] ? ($scan['complete'] ? 'complete' : 'partial') : 'not due',
-                'quarantined' => (int) $scan['quarantined'], 'resent' => $resent, 'heartbeat' => $beat, 'ping' => $ping);
+                'quarantined' => (int) $scan['quarantined'], 'pages' => $pages['result'], 'resent' => $resent, 'heartbeat' => $beat, 'ping' => $ping);
         }
         finally
         {
@@ -373,6 +408,166 @@ final class SecurityAlerts
             $state['files_deep'], $state['files_deep_at']);
         $state['files_reset_at'] = $this->now();   // the next run tells the owner that the baseline was reset on purpose
         $this->saveState($state);
+    }
+
+    /**
+     * "We are about to upload an update": opens a window of $minutes (1 to 240) in which ordinary code-file
+     * changes are not reported one notice at a time. When the window closes they come as ONE message that sums
+     * them up. Never covered by the window, always reported at once: content that looks like a backdoor, any
+     * program inside an upload folder, a change with its modification time put back.
+     *
+     * When no window is open yet, every check runs first (with a file scan), so whatever changed BEFORE the
+     * announcement is reported as usual and cannot slip into the window. Calling it while a window is open
+     * extends that window.
+     *
+     * @return array array('ok' => bool, 'until' => timestamp, 'run' => what run() returned for the first check
+     *               (null when an open window was extended), 'why' => reason when not ok)
+     */
+    public function expectChanges($minutes)
+    {
+        $minutes = max(1, min(240, (int) $minutes));
+        if (!$this->cfg['enabled'] || !$this->cfg['file_scan'] || !$this->cfg['scan_dirs'])
+        {
+            return array('ok' => false, 'until' => null, 'run' => null, 'why' => 'the file scan is off (no site_root), so there is nothing to announce');
+        }
+        $cur = $this->expectState();
+        if ($cur !== null && $this->now() <= $this->expectEnd($cur))
+        {
+            $cur['until'] = max((int) $cur['until'], $this->now() + $minutes * 60);
+            unset($cur['end']);
+            $this->saveExpect($cur);
+            return array('ok' => true, 'until' => (int) $cur['until'], 'run' => null, 'why' => '');
+        }
+        $this->forceScan = true;
+        $r = $this->run();
+        $this->forceScan = false;
+        if (isset($r['skipped']))
+        {
+            return array('ok' => false, 'until' => null, 'run' => $r, 'why' => 'another check is running right now: try again in a minute');
+        }
+        if ($r['file_scan'] !== 'complete')
+        {
+            /* a big site: the scan did not finish within scan_time_budget. Opening the window now would let the
+               changes that are still unread count as "expected". */
+            return array('ok' => false, 'until' => null, 'run' => $r, 'why' => 'the file scan did not finish in one go: run --expect again in a few minutes (or raise scan_time_budget)');
+        }
+        $now = $this->now();
+        $this->saveExpect(array('from' => $now, 'until' => $now + $minutes * 60, 'files' => array(), 'more' => 0));
+        $this->append('findings.ndjson', array('t' => $now, 'level' => self::LOG, 'kind' => 'system', 'key' => 'expect:open:' . $now,
+            'title' => $this->t('exp_title'), 'lines' => array($this->t('exp_opened', date('m/d H:i', $now), date('H:i', $now + $minutes * 60))), 'status' => 'logged'));
+        return array('ok' => true, 'until' => $now + $minutes * 60, 'run' => $r, 'why' => '');
+    }
+
+    /** Closes the update window now; the next run (call run() right after) sends the summary. @return bool false = no window was open */
+    public function endExpect()
+    {
+        $cur = $this->expectState();
+        if ($cur === null)
+        {
+            return false;
+        }
+        $cur['end'] = min($this->now(), isset($cur['end']) ? (int) $cur['end'] : PHP_INT_MAX) - 1;
+        $this->saveExpect($cur);
+        return true;
+    }
+
+    /**
+     * Roughly how many people can receive messages from the LINE account that sends the alerts (friends minus
+     * those who blocked it, as LINE counted them for yesterday, Japan time). Remembered for status().
+     *
+     * @return int|null null = LINE is not set up, line_friends_warn is 0, or LINE did not say
+     */
+    public function lineFriendCount()
+    {
+        $token = (string) $this->cfg['line_channel_access_token'];
+        if ((int) $this->cfg['line_friends_warn'] <= 0 || $token === '' || !$this->listOf($this->cfg['line_to']))
+        {
+            return null;
+        }
+        $base = rtrim((string) $this->cfg['line_api_base'], '/');
+        $headers = array('Authorization: Bearer ' . $token);
+        try
+        {
+            /* LINE needs about a day to count a date: yesterday first, then the day before */
+            for ($back = 1; $back <= 3; $back++)
+            {
+                $date = gmdate('Ymd', $this->now() + 9 * 3600 - $back * 86400);
+                $r = (array) $this->http($base . '/v2/bot/insight/followers?date=' . $date, $headers, '', 'GET');
+                $j = isset($r[0], $r[1]) && $r[0] >= 200 && $r[0] < 300 ? json_decode((string) $r[1], true) : null;
+                if (!is_array($j) || !isset($j['status']))
+                {
+                    return null;
+                }
+                if ($j['status'] === 'ready' && isset($j['followers']) && is_numeric($j['followers']))
+                {
+                    $n = max(0, (int) $j['followers'] - (isset($j['blocks']) && is_numeric($j['blocks']) ? (int) $j['blocks'] : 0));
+                    @file_put_contents($this->path('line-friends.json'), (string) $this->json(array('n' => $n, 'at' => $this->now())), LOCK_EX);
+                    return $n;
+                }
+                if ($j['status'] !== 'unready')
+                {
+                    return null;
+                }
+            }
+        }
+        catch (Throwable $e)
+        {
+        }
+        return null;
+    }
+
+    /**
+     * Reads every page in `page_watch` now, the four ways the page watch does, and lists the other sites each
+     * one uses. For looking at what the baseline will be (or was) made of: the first check trusts what is there,
+     * so links that are already hidden from you would become "normal". Nothing is sent and nothing is saved.
+     * Not time-limited: call it from the command line.
+     *
+     * @return array url => array(
+     *     'views'    => view => array(category => sorted list of sites) or a reason string when that view failed,
+     *     'only_bots' => category => sites that the crawler or Google visitors get but the browser and phone do not,
+     *     'outside'  => category => sites that are neither this site nor in page_allow, in any view)
+     *   view: browser | mobile | crawler | from_google; category: script | frame | form | redirect | link
+     */
+    public function pagesNow()
+    {
+        $out = array();
+        foreach ($this->listOf($this->cfg['page_watch']) as $url)
+        {
+            $got = $this->readPage($url);
+            $views = array();
+            foreach ($got['views'] as $v => $cats)
+            {
+                $views[$v] = array();
+                foreach ($cats as $cat => $hosts)
+                {
+                    $list = array_keys($hosts);
+                    sort($list, SORT_STRING);
+                    $views[$v][$cat] = $list;
+                }
+            }
+            foreach ($got['why'] as $v => $why)
+            {
+                $views[$v] = $why;
+            }
+            $outside = array();
+            foreach ($got['views'] as $cats)
+            {
+                foreach ($cats as $cat => $hosts)
+                {
+                    foreach ($hosts as $h => $_)
+                    {
+                        if (!$this->allowedHost($h, $url)) { $outside[$cat][$h] = true; }
+                    }
+                }
+            }
+            $only = array();
+            foreach ($this->hiddenFromOwner($got['views'], $url) as $cat => $hosts)
+            {
+                $only[$cat] = array_keys($hosts);
+            }
+            $out[$url] = array('views' => $views, 'only_bots' => $only, 'outside' => array_map('array_keys', $outside));
+        }
+        return $out;
     }
 
     /**
@@ -549,6 +744,10 @@ final class SecurityAlerts
                 'failing' => isset($state['ping_fail']['n']) ? (int) $state['ping_fail']['n'] : 0,
                 'failing_since' => isset($state['ping_fail']['since']) ? (int) $state['ping_fail']['since'] : null,
             ),
+            'pages'        => $this->pagesStatus(),
+            'expect'       => null,
+            /* the last answer from lineFriendCount(): array('n' => about how many friends, 'at' => when asked) */
+            'line_friends' => null,
             'recent'       => array(),
             'problems'     => array(),
         );
@@ -599,6 +798,40 @@ final class SecurityAlerts
         if ($out['outside_checkin']['failing'] >= 3) { $p[] = 'the outside check-in address has failed ' . $out['outside_checkin']['failing'] . ' times in a row'; }
         if ($scan && !$out['files']['baseline_ready'] && $out['last_run'] !== null) { $p[] = 'the file baseline is not complete yet'; }
         if ($this->cfg['site_root'] === '') { $p[] = 'file scan is off (site_root is not set)'; }
+        $exp = $this->expectState();
+        if ($exp !== null)
+        {
+            $n = $this->expectCounts($exp);
+            $out['expect'] = array('from' => (int) $exp['from'], 'until' => $this->expectEnd($exp), 'open' => $now <= $this->expectEnd($exp),
+                'new' => $n[0], 'changed' => $n[1], 'deleted' => $n[2]);
+        }
+        $pg = $out['pages'];
+        if ($pg['watched'] > 0)
+        {
+            if ($pg['checked'] === 0 && !empty($state['pages_web_only']))
+            {
+                $p[] = 'page_watch is set but no page has been read yet: it runs only when the checks are started from the command line (php …), not from a page view';
+            }
+            foreach ($pg['failing'] as $f)
+            {
+                if ($f['times'] >= 3)
+                {
+                    $p[] = 'page ' . $f['page'] . ': the ' . $f['view'] . ' view could not be read ' . $f['times'] . ' times in a row (' . $f['why'] . ')'
+                        . ($f['view'] === 'crawler' ? '; a firewall that blocks fake search-engine visits does this: that view is then skipped' : '');
+                }
+            }
+        }
+        $fr = $this->path('line-friends.json');
+        $j = is_file($fr) ? json_decode((string) @file_get_contents($fr), true) : null;
+        if ($line && is_array($j) && isset($j['n'], $j['at']))
+        {
+            $out['line_friends'] = array('n' => (int) $j['n'], 'at' => (int) $j['at']);
+            $warn = (int) $this->cfg['line_friends_warn'];
+            if ($warn > 0 && (int) $j['n'] > $warn)
+            {
+                $p[] = 'the LINE account that sends the alerts has about ' . (int) $j['n'] . ' friends: its key is on this server, and whoever breaks in can message all of them. Use an official account of its own for alerts';
+            }
+        }
         $out['problems'] = $p;
         return $out;
     }
@@ -1149,8 +1382,11 @@ final class SecurityAlerts
     private function checkFiles(array &$state, $now)
     {
         $res = array('ran' => false, 'complete' => false, 'findings' => array(), 'quarantined' => 0);
+        /* an update window announced with expectChanges(); once it has ended, the next run scans at once to send the summary */
+        $exp = $this->expectState();
+        $closing = $exp !== null && $now > $this->expectEnd($exp);
         $due = empty($state['files_complete_at']) || ($now - (int) $state['files_complete_at']) >= (float) $this->cfg['scan_hours'] * 3600
-            || !empty($state['files_partial']);
+            || !empty($state['files_partial']) || $this->forceScan || $closing;
         if (!$due)
         {
             return $res;
@@ -1336,9 +1572,151 @@ final class SecurityAlerts
         {
             $state['files_gen'] = $gen + 1;
         }
+        if ($exp !== null && $baselined)
+        {
+            /* Inside an announced update window the ordinary changes are collected, not reported one by one.
+               What fileFindings() would call URGENT stays here and is reported right away. */
+            $up = $this->cfg['upload_dirs'];
+            foreach ($new as $rel => $sus)
+            {
+                if (!$sus && !$this->inDirList($rel, $up)) { $this->expectAdd($exp, $rel, '+'); unset($new[$rel]); }
+            }
+            foreach ($changed as $rel => $more)
+            {
+                if (!$more && !$this->inDirList($rel, $this->cfg['runtime_dirs'])) { $this->expectAdd($exp, $rel, '~'); unset($changed[$rel]); }
+            }
+            foreach ($deleted as $i => $rel)
+            {
+                $this->expectAdd($exp, $rel, '-');
+                unset($deleted[$i]);
+            }
+            $deleted = array_values($deleted);
+            if ($closing && $complete)
+            {
+                $notes[] = $this->expectSummary($exp, $gen);
+                $this->dropExpect();
+            }
+            else
+            {
+                $this->saveExpect($exp, true);
+            }
+        }
         $res['complete'] = $complete;
         $res['findings'] = array_merge($notes, $this->fileFindings($new, $changed, $deleted, $gen, $moved));
         return $res;
+    }
+
+    /* ----------------------------------------------------------------------
+     * Update window ("we are about to upload": expectChanges())
+     * ---------------------------------------------------------------------- */
+
+    /** @return array|null the open (or ended but not yet summed up) window */
+    private function expectState()
+    {
+        $f = $this->cfg['state_dir'] . '/expect.json';
+        $j = is_file($f) ? json_decode((string) @file_get_contents($f), true) : null;
+        if (!is_array($j) || !isset($j['from'], $j['until']))
+        {
+            return null;
+        }
+        $j['files'] = isset($j['files']) && is_array($j['files']) ? $j['files'] : array();
+        $j['more'] = isset($j['more']) ? (int) $j['more'] : 0;
+        return $j;
+    }
+
+    /**
+     * When the window ends: the announced time, or earlier when it was closed by hand. Never more than 4 hours
+     * after it opened, whatever the file says: someone who breaks in could write a window "until 2099" to keep
+     * the monitor quiet. The worst they get is a few hours, and the summary still lists their changes.
+     */
+    private function expectEnd(array $exp)
+    {
+        $end = min((int) $exp['until'], (int) $exp['from'] + 4 * 3600);
+        return isset($exp['end']) ? min($end, (int) $exp['end']) : $end;
+    }
+
+    /**
+     * $merge: written from a scan, while the command line may have extended or closed the window in the
+     * meantime: keep the later announced end and an earlier hand-closing.
+     */
+    private function saveExpect(array $exp, $merge = false)
+    {
+        if ($merge && ($cur = $this->expectState()) !== null)
+        {
+            $exp['until'] = max((int) $exp['until'], (int) $cur['until']);
+            if (isset($cur['end']))
+            {
+                $exp['end'] = isset($exp['end']) ? min((int) $exp['end'], (int) $cur['end']) : (int) $cur['end'];
+            }
+        }
+        @file_put_contents($this->path('expect.json'), (string) $this->json($exp), LOCK_EX);
+    }
+
+    private function dropExpect()
+    {
+        @unlink($this->path('expect.json'));
+    }
+
+    /** One change seen inside the window. A file created and then deleted again cancels out. */
+    private function expectAdd(array &$exp, $rel, $sign)
+    {
+        $k = $this->packPath((string) $rel);
+        if (isset($exp['files'][$k]))
+        {
+            if ($sign === '-' && $exp['files'][$k] === '+') { unset($exp['files'][$k]); }
+            elseif ($sign === '-' || $sign === '+') { $exp['files'][$k] = $sign === '+' ? '~' : '-'; }   // deleted and put back = changed
+            return;
+        }
+        if (count($exp['files']) >= 5000)
+        {
+            $exp['more']++;   // a very large update: counted, not listed
+            return;
+        }
+        $exp['files'][$k] = $sign;
+    }
+
+    /** @return array array(new, changed, deleted) */
+    private function expectCounts(array $exp)
+    {
+        $n = array('+' => 0, '~' => 0, '-' => 0);
+        foreach ($exp['files'] as $sign)
+        {
+            if (isset($n[$sign])) { $n[$sign]++; }
+        }
+        return array($n['+'], $n['~'] + (int) $exp['more'], $n['-']);
+    }
+
+    private function expectSummary(array $exp, $gen)
+    {
+        list($a, $c, $d) = $this->expectCounts($exp);
+        $lines = array($this->t('exp_window', date('m/d H:i', (int) $exp['from']), date('H:i', $this->expectEnd($exp))));
+        if ($a + $c + $d === 0)
+        {
+            $lines[] = $this->t('exp_none');
+            return $this->finding('system', 'files:exp:' . (int) $exp['from'], self::LOG, $this->t('exp_title'), $lines, 1);
+        }
+        $lines[] = $this->t('file_summary', $a, $c, $d);
+        $marks = array('+' => '＋ ', '~' => '✎ ', '-' => '－ ');
+        $groups = array('+' => array(), '~' => array(), '-' => array());
+        foreach ($exp['files'] as $k => $sign)
+        {
+            if (isset($groups[$sign])) { $groups[$sign][] = $this->clean($this->unpackPath((string) $k)); }
+        }
+        $list = array();
+        foreach ($groups as $sign => $names)   // new, changed, deleted: the order of the notices outside a window
+        {
+            sort($names, SORT_STRING);
+            foreach ($names as $name) { $list[] = $marks[$sign] . $name; }
+        }
+        $total = $a + $c + $d;
+        if ($total > 5)
+        {
+            $list = array_slice($list, 0, 4);
+            $list[] = $this->t('file_more', $total - 4);
+        }
+        /* 1 window + 1 counts + at most 5 files + 1 hint = the 8 lines that are sent */
+        return $this->finding('files', 'files:exp:' . (int) $exp['from'] . ':' . $gen, self::NOTICE, $this->t('exp_title'),
+            array_merge($lines, $list, array($this->t('exp_hint'))), 168);
     }
 
     /** A program (not a server config file) inside an upload folder: the only thing quarantine_uploads acts on. */
@@ -1456,6 +1834,733 @@ final class SecurityAlerts
         if ($runtimeChanged)
         {
             $out[] = $this->finding('files', 'files:rt:' . $gen . ':' . md5(implode('|', $runtimeChanged)), self::LOG, $this->t('file_runtime_title'), array_map(array($this, 'clean'), array_slice($runtimeChanged, 0, 20)));
+        }
+        return $out;
+    }
+
+    /* ----------------------------------------------------------------------
+     * Page watch: what your pages pull in from other sites, as four kinds of visitor see them
+     * ---------------------------------------------------------------------- */
+
+    /** @return array array('result' => 'off' | 'not due' | 'command line only' | 'read N page(s)', 'findings' => array) */
+    private function checkPages(array &$state, $now)
+    {
+        $res = array('result' => 'off', 'findings' => array());
+        $pages = $this->listOf($this->cfg['page_watch']);
+        if (!$pages)
+        {
+            return $res;
+        }
+        if (PHP_SAPI !== 'cli' && !is_callable($this->cfg['page_transport']))
+        {
+            /* Reading your own pages from inside a visitor's page view could tie up the server (and on some hosts
+               wait for itself). The scheduled job does it. */
+            $state['pages_web_only'] = $now;
+            $res['result'] = 'command line only';
+            return $res;
+        }
+        unset($state['pages_web_only']);
+        $rec = $this->loadPages();
+        if (!$rec && !empty($state['pages_baselined']))
+        {
+            $res['findings'][] = $this->finding('pages', 'pages:lost:' . date('Ymd', $now), self::NOTICE, $this->t('page_lost_title'), array($this->t('page_lost_body')), 24);
+            unset($state['pages_baselined']);
+        }
+        $every = max(0.0, (float) $this->cfg['page_watch_hours']) * 3600;
+        $todo = array();
+        foreach ($pages as $url)
+        {
+            $at = isset($rec[$url]['at']) ? (int) $rec[$url]['at'] : 0;
+            if ($at === 0 || $now - $at >= $every)
+            {
+                $todo[$url] = $at;
+            }
+        }
+        if (!$todo)
+        {
+            $res['result'] = 'not due';
+            return $res;
+        }
+        asort($todo);   // the longest unchecked first; what does not fit in this run is first in the next
+        $deadline = microtime(true) + 45;
+        $found = array('hidden' => array(), 'code' => array(), 'links' => array());
+        $n = 0;
+        foreach (array_keys($todo) as $url)
+        {
+            if ($n > 0 && microtime(true) > $deadline)
+            {
+                break;
+            }
+            $row = isset($rec[$url]) && is_array($rec[$url]) ? $rec[$url] : array();
+            foreach ($this->checkPage((string) $url, $row, $now) as $type => $lines)
+            {
+                $found[$type] = array_merge($found[$type], $lines);
+            }
+            $rec[$url] = $row;
+            $n++;
+        }
+        foreach (array_keys($rec) as $url)
+        {
+            if (!in_array((string) $url, $pages, true))
+            {
+                unset($rec[$url]);   // no longer watched
+            }
+        }
+        $this->savePages($rec);
+        foreach ($rec as $row)
+        {
+            if (isset($row['k']))
+            {
+                $state['pages_baselined'] = true;
+                break;
+            }
+        }
+        $res['result'] = 'read ' . $n . ' page(s)';
+        $kinds = array(
+            'hidden' => array(self::URGENT, 'page_hidden_title', 'page_hidden_hint'),
+            'code'   => array(self::URGENT, 'page_code_title', 'page_code_hint'),
+            'links'  => array(self::NOTICE, 'page_links_title', 'page_links_hint'),
+        );
+        foreach ($kinds as $type => $def)
+        {
+            if (!$found[$type])
+            {
+                continue;
+            }
+            $lines = $found[$type];
+            if (count($lines) > 7)
+            {
+                $lines = array_slice($lines, 0, 6);
+                $lines[] = $this->t('page_more', count($found[$type]) - 6);
+            }
+            $lines[] = $this->t($def[2]);
+            $res['findings'][] = $this->finding('pages', 'pages:' . $type . ':' . md5(implode('|', $found[$type])), $def[0], $this->t($def[1]), $lines, 168);
+        }
+        return $res;
+    }
+
+    /**
+     * Reads one page and compares it with its record ($row: 'at' last read, 'k' category => site => first seen,
+     * 'f' / 'w' view => failures in a row / last reason). The first successful read is the baseline.
+     *
+     * @return array 'hidden' | 'code' | 'links' => message lines
+     */
+    private function checkPage($url, array &$row, $now)
+    {
+        $got = $this->readPage($url);
+        $row['at'] = $now;
+        $fails = isset($row['f']) && is_array($row['f']) ? $row['f'] : array();
+        $whys = isset($row['w']) && is_array($row['w']) ? $row['w'] : array();
+        foreach (array_keys($this->pageViews()) as $v)
+        {
+            if (isset($got['why'][$v]))
+            {
+                $fails[$v] = (isset($fails[$v]) ? (int) $fails[$v] : 0) + 1;
+                $whys[$v] = $got['why'][$v];
+            }
+            else
+            {
+                unset($fails[$v], $whys[$v]);
+            }
+        }
+        $row['f'] = $fails;
+        $row['w'] = $whys;
+        if (!$got['views'])
+        {
+            return array();   // nothing read: the site is down or refuses us; not this module's business beyond status()
+        }
+        $all = array();
+        foreach ($got['views'] as $cats)
+        {
+            foreach ($cats as $cat => $hosts)
+            {
+                foreach ($hosts as $h => $_) { $all[$cat][$h] = true; }
+            }
+        }
+        $known = isset($row['k']) && is_array($row['k']) ? $row['k'] : null;
+        if ($known === null)
+        {
+            $row['k'] = array();
+            foreach ($all as $cat => $hosts)
+            {
+                foreach ($hosts as $h => $_) { $row['k'][$cat][$h] = $now; }
+            }
+            $this->capKnown($row['k']);
+            return array();
+        }
+        $out = array('hidden' => array(), 'code' => array(), 'links' => array());
+        $label = $this->pageLabel($url);
+        $hidden = $this->hiddenFromOwner($got['views'], $url);
+        $who = array();
+        foreach ($hidden as $cat => $hosts)
+        {
+            foreach ($hosts as $h => $views)
+            {
+                if (!isset($known[$cat][$h]))
+                {
+                    $who[(isset($views['crawler']) ? 'c' : '') . (isset($views['from_google']) ? 'g' : '')][$h] = true;
+                }
+            }
+        }
+        foreach ($who as $w => $hosts)
+        {
+            $out['hidden'][] = $this->t('page_hidden_line', $label, $this->t('page_who_' . $w), $this->hostList(array_keys($hosts)));
+        }
+        $code = array('script' => array(), 'frame' => array(), 'form' => array(), 'redirect' => array());
+        $links = array();
+        foreach ($all as $cat => $hosts)
+        {
+            foreach ($hosts as $h => $_)
+            {
+                if (isset($known[$cat][$h]) || isset($hidden[$cat][$h]) || $this->allowedHost($h, $url))
+                {
+                    continue;
+                }
+                if ($cat === 'link') { $links[] = $h; }
+                elseif (isset($code[$cat])) { $code[$cat][] = $h; }
+            }
+        }
+        foreach ($code as $cat => $hosts)
+        {
+            if ($hosts)
+            {
+                $out['code'][] = $this->t('page_new_' . $cat, $label, $this->hostList($hosts));
+            }
+        }
+        if ($links && $this->cfg['page_links'])
+        {
+            $out['links'][] = $this->t('page_new_links', $label, $this->hostList($links));
+        }
+        foreach ($all as $cat => $hosts)
+        {
+            foreach ($hosts as $h => $_)
+            {
+                if (!isset($known[$cat][$h])) { $known[$cat][$h] = $now; }   // reported once, then part of the record
+            }
+        }
+        $this->capKnown($known);
+        $row['k'] = $known;
+        return $out;
+    }
+
+    /** At most 500 sites per category and page, the most recently added kept. */
+    private function capKnown(array &$known)
+    {
+        foreach ($known as $cat => $hosts)
+        {
+            if (count($hosts) > 500)
+            {
+                arsort($hosts);
+                $known[$cat] = array_slice($hosts, 0, 500, true);
+            }
+        }
+    }
+
+    /**
+     * Sites that the crawler or a visitor from Google get, but neither the desktop browser nor the phone does
+     * (compared within the same category). Needs both of those to have answered: a phone layout differs from
+     * the desktop one, and comparing against one of them alone would mistake that for hiding.
+     *
+     * @return array category => site => array(view => true)
+     */
+    private function hiddenFromOwner(array $views, $url)
+    {
+        if (!isset($views['browser'], $views['mobile']))
+        {
+            return array();
+        }
+        $seen = array();
+        foreach (array('browser', 'mobile') as $v)
+        {
+            foreach ($views[$v] as $cat => $hosts)
+            {
+                foreach ($hosts as $h => $_) { $seen[$cat][$h] = true; }
+            }
+        }
+        $out = array();
+        foreach (array('crawler', 'from_google') as $v)
+        {
+            if (!isset($views[$v]))
+            {
+                continue;
+            }
+            foreach ($views[$v] as $cat => $hosts)
+            {
+                foreach ($hosts as $h => $_)
+                {
+                    if (!isset($seen[$cat][$h]) && !$this->allowedHost($h, $url))
+                    {
+                        $out[$cat][$h][$v] = true;
+                    }
+                }
+            }
+        }
+        return $out;
+    }
+
+    /** The four ways a page is read. Request headers only; nothing else differs. */
+    private function pageViews()
+    {
+        $base = array('Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language: ' . ($this->cfg['language'] === 'zh-TW' ? 'zh-TW,zh;q=0.9,en;q=0.8' : 'en;q=0.9,*;q=0.5'));
+        $desktop = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
+        $phone = 'Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36';
+        /* the form Google gives for its smartphone crawler; injected spam looks for "Googlebot" in it */
+        $crawler = 'Mozilla/5.0 (Linux; Android 6.0.1; Nexus 5X Build/MMB29P) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.6778.204 Mobile Safari/537.36 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)';
+        return array(
+            'browser'     => array_merge($base, array('User-Agent: ' . $desktop)),
+            'mobile'      => array_merge($base, array('User-Agent: ' . $phone)),
+            'crawler'     => array_merge($base, array('User-Agent: ' . $crawler)),
+            'from_google' => array_merge($base, array('User-Agent: ' . $phone, 'Referer: https://www.google.com/')),
+        );
+    }
+
+    /** @return array array('views' => view => category => site => true, 'why' => view => reason it could not be read) */
+    private function readPage($url)
+    {
+        $views = array();
+        $why = array();
+        foreach ($this->pageViews() as $v => $headers)
+        {
+            if (!preg_match('#^https?://[^/\s?\#]+#i', $url))
+            {
+                $why[$v] = 'not an http(s) address';
+                continue;
+            }
+            $r = $this->fetchPage($url, $headers);
+            if ($r['ok'])
+            {
+                $views[$v] = $this->pageHosts($url, $r['body'], $r['redirect']);
+            }
+            else
+            {
+                $why[$v] = $r['why'];
+            }
+        }
+        return array('views' => $views, 'why' => $why);
+    }
+
+    /**
+     * GET one page. Redirects within the same site are followed (http -> https, adding "www", at most 5);
+     * a redirect to another site is not followed: the site it points to is the result ('redirect').
+     *
+     * @return array array('ok' => bool, 'body' => string, 'redirect' => site or '', 'why' => string)
+     */
+    private function fetchPage($url, array $headers)
+    {
+        $timeout = max(1, min(60, (int) $this->cfg['page_timeout']));
+        $max = max(65536, (int) $this->cfg['page_max_bytes']);
+        $cur = $url;
+        for ($hop = 0; $hop < 6; $hop++)
+        {
+            try
+            {
+                $r = is_callable($this->cfg['page_transport'])
+                    ? (array) call_user_func($this->cfg['page_transport'], $cur, $headers, $timeout)
+                    : $this->requestPage($cur, $headers, $timeout, $max);
+            }
+            catch (Throwable $e)
+            {
+                return array('ok' => false, 'body' => '', 'redirect' => '', 'why' => 'an error while reading the page');
+            }
+            $code = isset($r[0]) && is_numeric($r[0]) ? (int) $r[0] : 0;
+            $loc = isset($r[2]) && is_scalar($r[2]) ? trim((string) $r[2]) : '';
+            if ($code >= 200 && $code < 300)
+            {
+                return array('ok' => true, 'body' => substr(isset($r[1]) && is_scalar($r[1]) ? (string) $r[1] : '', 0, $max), 'redirect' => '', 'why' => '');
+            }
+            if ($code >= 300 && $code < 400 && $loc !== '')
+            {
+                $next = $this->resolveUrl($cur, $loc);
+                $h = $this->hostOf($next);
+                if ($h !== '' && $this->ownHost($h, $url))
+                {
+                    $cur = $next;
+                    continue;
+                }
+                return array('ok' => true, 'body' => '', 'redirect' => $h !== '' ? $h : '?', 'why' => '');
+            }
+            return array('ok' => false, 'body' => '', 'redirect' => '', 'why' => $code > 0 ? 'HTTP ' . $code : 'no answer (could not connect, or it timed out)');
+        }
+        return array('ok' => false, 'body' => '', 'redirect' => '', 'why' => 'too many redirects');
+    }
+
+    /** @return array array(int $status, string $body, string $location); status 0 = no answer */
+    private function requestPage($url, array $headers, $timeout, $max)
+    {
+        if (!function_exists('curl_init'))
+        {
+            $ctx = stream_context_create(array('http' => array('method' => 'GET', 'header' => implode("\r\n", $headers), 'timeout' => $timeout,
+                'ignore_errors' => true, 'follow_location' => 0)));
+            $fp = @fopen($url, 'rb', false, $ctx);
+            if (!$fp)
+            {
+                return array(0, '', '');
+            }
+            $meta = stream_get_meta_data($fp);
+            $body = (string) stream_get_contents($fp, $max);
+            fclose($fp);
+            $code = 0;
+            $loc = '';
+            foreach (isset($meta['wrapper_data']) ? (array) $meta['wrapper_data'] : array() as $h)
+            {
+                if (preg_match('/^HTTP\/\S+\s+(\d{3})/', (string) $h, $m)) { $code = (int) $m[1]; $loc = ''; }
+                elseif (preg_match('/^Location:\s*(\S.*?)\s*$/i', (string) $h, $m)) { $loc = $m[1]; }
+            }
+            return array($code, $body, $loc);
+        }
+        $body = '';
+        $loc = '';
+        $ch = curl_init($url);
+        curl_setopt_array($ch, array(
+            CURLOPT_HTTPHEADER => $headers, CURLOPT_HTTPGET => true, CURLOPT_FOLLOWLOCATION => false,
+            CURLOPT_TIMEOUT => $timeout, CURLOPT_CONNECTTIMEOUT => min(5, $timeout), CURLOPT_ENCODING => '',
+            CURLOPT_HEADERFUNCTION => function ($c, $line) use (&$loc) {
+                if (preg_match('/^Location:\s*(\S.*?)\s*$/i', $line, $m)) { $loc = $m[1]; }
+                return strlen($line);
+            },
+            CURLOPT_WRITEFUNCTION => function ($c, $chunk) use (&$body, $max) {
+                $body .= $chunk;
+                return strlen($body) > $max ? 0 : strlen($chunk);   // enough read: stop
+            },
+        ));
+        curl_exec($ch);
+        $code = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        if (PHP_VERSION_ID < 80000)
+        {
+            curl_close($ch);
+        }
+        return array($code, substr($body, 0, $max), $loc);
+    }
+
+    /** $loc from a Location header, made absolute against $base. */
+    private function resolveUrl($base, $loc)
+    {
+        if (preg_match('#^[a-z][a-z0-9+.-]*:#i', $loc))
+        {
+            return $loc;
+        }
+        if (!preg_match('#^([a-z][a-z0-9+.-]*:)//([^/?\#]*)([^?\#]*)#i', $base, $b))
+        {
+            return $loc;
+        }
+        if (strncmp($loc, '//', 2) === 0)
+        {
+            return $b[1] . $loc;
+        }
+        if (isset($loc[0]) && $loc[0] === '/')
+        {
+            return $b[1] . '//' . $b[2] . $loc;
+        }
+        $dir = substr($b[3], 0, (int) strrpos($b[3], '/') + 1);
+        return $b[1] . '//' . $b[2] . ($dir === '' ? '/' : $dir) . $loc;
+    }
+
+    /**
+     * The other sites one page uses, by category: script (code it runs), frame (pages and objects it embeds),
+     * form (where forms send what is typed), redirect, link. This site's own addresses are left out.
+     *
+     * @return array category => site => true
+     */
+    private function pageHosts($pageUrl, $html, $redirect)
+    {
+        $cats = array('script' => array(), 'frame' => array(), 'form' => array(), 'redirect' => array(), 'link' => array());
+        $add = function ($cat, $u) use (&$cats, $pageUrl) {
+            $h = $this->hostOf($u);
+            if ($h !== '' && count($cats[$cat]) < 500 && !$this->ownHost($h, $pageUrl))
+            {
+                $cats[$cat][$h] = true;
+            }
+        };
+        if ($redirect !== '')
+        {
+            $cats['redirect'][$redirect] = true;
+        }
+        list($scripts, $rest) = $this->htmlParts((string) $html);
+        foreach ($scripts as $s)
+        {
+            $a = $this->attrs($s[0]);
+            if (isset($a['src']))
+            {
+                $add('script', $a['src']);
+                continue;
+            }
+            $type = isset($a['type']) ? strtolower(trim($a['type'])) : '';
+            if ($type !== '' && !in_array($type, array('text/javascript', 'application/javascript', 'module', 'text/ecmascript', 'application/ecmascript'), true))
+            {
+                continue;   // JSON-LD, templates: data, not code
+            }
+            /* addresses written inside the code: what a loader script will fetch ("https:\/\/" in JSON form too) */
+            if (preg_match_all('#(?:https?:)?//([A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*\.[A-Za-z]{2,63})(?![A-Za-z0-9-])#',
+                str_replace('\\/', '/', $s[1]), $u))
+            {
+                foreach ($u[1] as $h) { $add('script', '//' . $h); }
+            }
+        }
+        if (preg_match_all('/<(a|area|iframe|frame|embed|object|form|button|input|meta|link)\b([^>]*)>/i', $rest, $t, PREG_SET_ORDER))
+        {
+            foreach ($t as $tag)
+            {
+                $a = $this->attrs($tag[2]);
+                switch (strtolower($tag[1]))
+                {
+                    case 'a':
+                    case 'area':
+                        if (isset($a['href'])) { $add('link', $a['href']); }
+                        break;
+                    case 'iframe':
+                    case 'frame':
+                    case 'embed':
+                        if (isset($a['src'])) { $add('frame', $a['src']); }
+                        break;
+                    case 'object':
+                        if (isset($a['data'])) { $add('frame', $a['data']); }
+                        break;
+                    case 'form':
+                        if (isset($a['action'])) { $add('form', $a['action']); }
+                        break;
+                    case 'button':
+                    case 'input':
+                        if (isset($a['formaction'])) { $add('form', $a['formaction']); }
+                        break;
+                    case 'meta':
+                        if (isset($a['http-equiv'], $a['content']) && strtolower(trim($a['http-equiv'])) === 'refresh'
+                            && preg_match('/url\s*=\s*[\'"]?([^\'"\s;]+)/i', $a['content'], $mm))
+                        {
+                            $add('redirect', $mm[1]);
+                        }
+                        break;
+                    case 'link':
+                        $rel = isset($a['rel']) ? strtolower($a['rel']) : '';
+                        if (isset($a['href']) && (strpos($rel, 'modulepreload') !== false
+                            || (strpos($rel, 'preload') !== false && isset($a['as']) && strtolower(trim($a['as'])) === 'script')))
+                        {
+                            $add('script', $a['href']);
+                        }
+                        break;
+                }
+            }
+        }
+        return $cats;
+    }
+
+    /**
+     * Splits a page into its <script> elements (attributes, content) and the rest, with comments, scripts and
+     * styles taken out of the rest. A plain left-to-right walk rather than one big regular expression: a page
+     * with a huge inline script must not make the pattern give up (PCRE's backtracking limit) and the page
+     * look empty — which is exactly what someone hiding something would want.
+     *
+     * @return array array(list of array(string $attributes, string $content), string $rest)
+     */
+    private function htmlParts($html)
+    {
+        $scripts = array();
+        $rest = '';
+        $len = strlen($html);
+        $pos = 0;
+        while ($pos < $len)
+        {
+            $lt = strpos($html, '<', $pos);
+            if ($lt === false)
+            {
+                $rest .= substr($html, $pos);
+                break;
+            }
+            $rest .= substr($html, $pos, $lt - $pos);
+            if (substr($html, $lt, 4) === '<!--')
+            {
+                $end = strpos($html, '-->', $lt + 4);
+                $pos = $end === false ? $len : $end + 3;
+                $rest .= ' ';
+                continue;
+            }
+            if (preg_match('/\G<(script|style)\b/i', $html, $m, 0, $lt))
+            {
+                $gt = strpos($html, '>', $lt);
+                if ($gt === false)
+                {
+                    break;
+                }
+                $open = strlen($m[0]);
+                $close = stripos($html, '</' . $m[1], $gt + 1);
+                if (strtolower($m[1]) === 'script')
+                {
+                    $scripts[] = array(substr($html, $lt + $open, $gt - $lt - $open),
+                        $close === false ? (string) substr($html, $gt + 1) : (string) substr($html, $gt + 1, $close - $gt - 1));
+                }
+                $end = $close === false ? false : strpos($html, '>', $close);
+                $pos = $end === false ? $len : $end + 1;
+                $rest .= ' ';
+                continue;
+            }
+            $rest .= '<';
+            $pos = $lt + 1;
+        }
+        return array($scripts, $rest);
+    }
+
+    /** The attributes of one tag, lower-case names, entities decoded. The first of a repeated name wins (as in browsers). */
+    private function attrs($s)
+    {
+        $out = array();
+        if (preg_match_all('/([^\s=\/>"\']+)\s*=\s*(?:"([^"]*)"|\'([^\']*)\'|([^\s>"\']+))/', (string) $s, $m, PREG_SET_ORDER))
+        {
+            foreach ($m as $x)
+            {
+                $k = strtolower($x[1]);
+                if (isset($out[$k]))
+                {
+                    continue;
+                }
+                $v = isset($x[4]) && $x[4] !== '' ? $x[4] : (isset($x[3]) && $x[3] !== '' ? $x[3] : $x[2]);
+                $out[$k] = html_entity_decode($v, ENT_QUOTES | ENT_HTML5, 'UTF-8');
+            }
+        }
+        return $out;
+    }
+
+    /**
+     * The site an address points to, the way a browser reads it: tabs and line breaks dropped, "\" taken as
+     * "/", a "user@" part skipped. '' = this site (a relative address) or not a web address (mailto:, tel:,
+     * javascript:…). 'data:' = code or content written into the address itself.
+     */
+    private function hostOf($u)
+    {
+        $u = str_replace('\\', '/', (string) preg_replace('/[\x00-\x20]+/', '', (string) $u));
+        if ($u === '')
+        {
+            return '';
+        }
+        if (strncasecmp($u, 'data:', 5) === 0)
+        {
+            return 'data:';
+        }
+        if (!preg_match('#^(?:([a-z][a-z0-9+.-]*):)?//([^/?\#]*)#i', $u, $m))
+        {
+            return '';
+        }
+        if ($m[1] !== '' && !in_array(strtolower($m[1]), array('http', 'https'), true))
+        {
+            return '';
+        }
+        $auth = $m[2];
+        if (($at = strrpos($auth, '@')) !== false)
+        {
+            $auth = substr($auth, $at + 1);
+        }
+        if (preg_match('/^\[[^\]]*\]/', $auth, $mm))
+        {
+            return strtolower($mm[0]);
+        }
+        $h = strtolower(rtrim((string) preg_replace('/:\d*$/', '', $auth), '.'));
+        if ($h === '' || strlen($h) > 253)
+        {
+            return '';
+        }
+        return $this->clean($h);
+    }
+
+    /** The page's own site: the same host, or the same name without "www." and any sub-domain of it. */
+    private function ownHost($h, $pageUrl)
+    {
+        $p = $this->hostOf($pageUrl);
+        if ($p === '' || $h === '' || $h === 'data:')
+        {
+            return false;
+        }
+        $base = (string) preg_replace('/^www\./', '', $p);
+        return $h === $p || $h === $base || substr($h, -strlen($base) - 1) === '.' . $base;
+    }
+
+    /** This site, or a site in `page_allow` (sub-domains included). */
+    private function allowedHost($h, $pageUrl)
+    {
+        if ($this->ownHost($h, $pageUrl))
+        {
+            return true;
+        }
+        foreach ($this->listOf($this->cfg['page_allow']) as $a)
+        {
+            $a = strtolower($a);
+            if ($a === 'data:')
+            {
+                if ($h === 'data:') { return true; }
+                continue;
+            }
+            $a = strpos($a, '//') !== false ? $this->hostOf($a) : rtrim((string) preg_replace(array('#^\*?\.#', '#[/:].*$#'), '', $a), '.');
+            if ($a !== '' && ($h === $a || substr($h, -strlen($a) - 1) === '.' . $a))
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Site names for a message, at most four. Written as "example[.]com": chat apps turn a bare domain into a
+     * link, and these may be an attacker's sites.
+     */
+    private function hostList(array $hosts)
+    {
+        $hosts = array_values(array_unique(array_map('strval', $hosts)));
+        sort($hosts, SORT_STRING);
+        $shown = array();
+        foreach (array_slice($hosts, 0, 4) as $h)
+        {
+            $shown[] = $h === 'data:' ? $this->t('page_data_url') : str_replace('.', '[.]', $h);
+        }
+        return implode(', ', $shown) . (count($hosts) > 4 ? ' ' . $this->t('page_and_more', count($hosts) - 4) : '');
+    }
+
+    /** "home page", "/cart" — or with the host in front when the watched pages are on more than one site. */
+    private function pageLabel($url)
+    {
+        $hosts = array();
+        foreach ($this->listOf($this->cfg['page_watch']) as $u)
+        {
+            $hosts[$this->hostOf($u)] = true;
+        }
+        $p = preg_match('#^[a-z][a-z0-9+.-]*://[^/?\#]*([^\#]*)#i', $url, $m) ? $m[1] : '';
+        $path = $p === '' || $p === '/' ? $this->t('page_home') : $p;
+        return $this->cut((count($hosts) > 1 ? $this->hostOf($url) . ' ' : '') . $path, 70);
+    }
+
+    private function loadPages()
+    {
+        $f = $this->cfg['state_dir'] . '/pages.json';
+        $j = is_file($f) ? json_decode((string) @file_get_contents($f), true) : null;
+        return is_array($j) ? $j : array();
+    }
+
+    private function savePages(array $rec)
+    {
+        $json = $this->json($rec, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+        if ($json !== false)
+        {
+            @file_put_contents($this->path('pages.json'), $json, LOCK_EX);
+        }
+    }
+
+    /** For status(): how the page watch is doing, without reading any page. */
+    private function pagesStatus()
+    {
+        $list = $this->listOf($this->cfg['page_watch']);
+        $rec = $list ? $this->loadPages() : array();
+        $out = array('watched' => count($list), 'checked' => 0, 'last_check' => null, 'failing' => array());
+        foreach ($list as $url)
+        {
+            if (!isset($rec[$url]) || !is_array($rec[$url]))
+            {
+                continue;
+            }
+            $row = $rec[$url];
+            if (isset($row['k'])) { $out['checked']++; }
+            if (!empty($row['at'])) { $out['last_check'] = max((int) $out['last_check'], (int) $row['at']); }
+            foreach (isset($row['f']) && is_array($row['f']) ? $row['f'] : array() as $v => $n)
+            {
+                $out['failing'][] = array('page' => $this->pageLabel($url), 'view' => (string) $v, 'times' => (int) $n,
+                    'why' => isset($row['w'][$v]) ? (string) $row['w'][$v] : '');
+            }
         }
         return $out;
     }
@@ -1703,6 +2808,12 @@ final class SecurityAlerts
         {
             return 'waiting for daytime';
         }
+        if ($this->expectState() !== null)
+        {
+            /* the changes of an update window are told in its summary; a check-in now would see a new
+               fingerprint with no change on record yet. At most a few hours: windows are capped. */
+            return 'waiting for the update window';
+        }
         $body = array(
             $this->t('hb_counts', max(1, (int) round(($now - (int) $hb['at']) / 86400)), (int) $hb['runs'], (int) $hb['sent'], (int) $hb['urgent']),
         );
@@ -1779,6 +2890,13 @@ final class SecurityAlerts
             {
                 $body[] = $this->t('hb_quota', $quota['used'], $quota['limit']);
             }
+        }
+        /* asked whenever a LINE key is set up, used or not: the risk is the key lying on the server */
+        $friends = $this->lineFriendCount();
+        if ($friends !== null && $friends > (int) $this->cfg['line_friends_warn'])
+        {
+            $body[] = $this->t('hb_friends', $friends);
+            $warn = true;
         }
         $body[] = $this->t('hb_since', date('Y-m-d', (int) $state['installed_at']));
         $body[] = $this->t('hb_hint');
@@ -2669,6 +3787,31 @@ final class SecurityAlerts
                 'hb_ping_bad' => '⚠ The outside check-in address has failed %d time(s) in a row (since %s). Have your developer check ping_url, or nobody will tell you when the schedule stops.',
                 'hb_since' => 'Records go back to %s. If that date is newer than you remember, the records were reset: ask why.',
                 'hb_hint' => 'You get this once a week. If a week passes without it, the checks have stopped running.',
+                'hb_friends' => '⚠ The LINE account that sends these alerts has about %d friends. Its key is on this server: whoever breaks in can message all of them. Alerts belong in an official account of their own (see the README).',
+                'exp_title' => 'Code changes during your announced update',
+                'exp_opened' => 'Update window announced: %s until %s.',
+                'exp_window' => 'Update window %s–%s (announced on the server with --expect).',
+                'exp_none' => 'No code file changed during the window.',
+                'exp_hint' => 'Fine if this was your update. If nobody updated the site then, treat it as a break-in: someone on the server may have announced the window to hide these changes.',
+                'page_home' => 'home page',
+                'page_code_title' => 'A page started using another site',
+                'page_new_script' => '%s: runs code from %s',
+                'page_new_frame' => '%s: embeds %s',
+                'page_new_form' => '%s: a form now sends what visitors type to %s',
+                'page_new_redirect' => '%s: sends visitors on to %s',
+                'page_code_hint' => 'If you or your developer did not just add this (a chat box, a payment or analytics service), someone may have put it into your settings or database to steal what customers type or to send them elsewhere. Have your developer find where it comes from; if it is yours, add the site to page_allow. Names are written as name[.]com on purpose, so they cannot be opened by a tap.',
+                'page_hidden_title' => 'Your pages show search engines something you do not see',
+                'page_hidden_line' => '%s: only %s get %s',
+                'page_who_c' => 'search engines', 'page_who_g' => 'visitors coming from a Google search', 'page_who_cg' => 'search engines and visitors from Google',
+                'page_hidden_hint' => 'This is how gambling and spam-link injections hide: the site looks normal to you, while Google sees (or sends your customers to) something else. Have your developer search the database (articles, settings, footer) and the code for these names, then ask Google to review the site in Search Console. Names are written as name[.]com on purpose, so they cannot be opened by a tap.',
+                'page_links_title' => 'New links to other sites on your pages',
+                'page_new_links' => '%s: %s',
+                'page_links_hint' => 'Fine if you or your staff added them (a new article, a partner). If nobody did, links may have been slipped into the page: check it. Names are written as name[.]com on purpose, so they cannot be opened by a tap.',
+                'page_more' => '…and %d more',
+                'page_and_more' => '(+%d more)',
+                'page_data_url' => 'code written into the page itself (a data: address)',
+                'page_lost_title' => 'The page-watch records have disappeared',
+                'page_lost_body' => 'What your pages looked like is no longer on record; the next check starts over from the pages as they are now. If nobody reset the monitor, someone may be covering their tracks.',
             ),
             'zh-TW' => array(
                 'header' => "🔒 網站安全提醒｜%s（%s）",
@@ -2745,6 +3888,31 @@ final class SecurityAlerts
                 'hb_ping_bad' => '⚠ 外部報到網址已經連續失敗 %d 次（從 %s 起）。請工程師檢查設定裡的 ping_url，不然排程停了不會有人通知你。',
                 'hb_since' => '紀錄從 %s 開始。這個日期如果比你記得的新，代表紀錄被重設過，要問清楚原因。',
                 'hb_hint' => '這則每週一次。哪一週沒收到，代表檢查沒在跑。',
+                'hb_friends' => '⚠ 發這些通知的 LINE 官方帳號大約有 %d 個好友。它的金鑰放在這台主機上：網站被入侵時，對方可以用它發訊息給所有好友。通知請改用一個只發通知的官方帳號（見 README）。',
+                'exp_title' => '預告的更新時段內，程式有這些變動',
+                'exp_opened' => '已預告更新時段：%s 到 %s。',
+                'exp_window' => '更新時段 %s～%s（在主機上用 --expect 預告的）。',
+                'exp_none' => '這段時間沒有程式檔變動。',
+                'exp_hint' => '是你們的更新就沒事。如果那段時間其實沒有人更新網站，請當成被入侵處理：可能是有人進了主機，用預告來掩護這些變動。',
+                'page_home' => '首頁',
+                'page_code_title' => '網頁開始用到別的網站',
+                'page_new_script' => '%s：多了來自 %s 的程式',
+                'page_new_frame' => '%s：嵌入了 %s',
+                'page_new_form' => '%s：表單改成把客人填的資料送到 %s',
+                'page_new_redirect' => '%s：會把客人轉到 %s',
+                'page_code_hint' => '如果不是你們剛加的（客服聊天、金流、分析工具），可能有人改了網站設定或資料庫，想偷客人輸入的資料或把客人導走。請工程師查這段是從哪裡來的；確定是自己加的，把網域加進 page_allow 就不會再提醒。網域寫成 name[.]com 是故意的，避免不小心點開。',
+                'page_hidden_title' => '網頁給搜尋引擎看的，跟你看到的不一樣',
+                'page_hidden_line' => '%s：只有%s看得到 %s',
+                'page_who_c' => '搜尋引擎', 'page_who_g' => '從 Google 搜尋點進來的客人', 'page_who_cg' => '搜尋引擎和從 Google 點進來的客人',
+                'page_hidden_hint' => '這是博弈、垃圾連結入侵的典型手法：你自己打開一切正常，Google 看到的（或把客人送去的）卻是別的東西。請工程師在資料庫（文章、設定、頁尾）和程式裡搜尋這些網域，清乾淨後到 Google Search Console 要求重新審查。網域寫成 name[.]com 是故意的，避免不小心點開。',
+                'page_links_title' => '網頁上多了連往別的網站的連結',
+                'page_new_links' => '%s：%s',
+                'page_links_hint' => '如果是你們自己加的（新文章、合作夥伴）就沒事；沒有人加過的話，可能是被塞了連結，請檢查那一頁。網域寫成 name[.]com 是故意的，避免不小心點開。',
+                'page_more' => '…另外還有 %d 項',
+                'page_and_more' => '（另外 %d 個）',
+                'page_data_url' => '直接寫在網頁裡的程式（data: 網址）',
+                'page_lost_title' => '網頁監看的紀錄不見了',
+                'page_lost_body' => '原本記下的網頁樣子不見了，下次檢查會從網頁現在的樣子重新開始。如果沒有人重設過，可能是有人在湮滅痕跡。',
             ),
         );
         $lang = isset($s[$this->cfg['language']]) ? $this->cfg['language'] : 'en';

