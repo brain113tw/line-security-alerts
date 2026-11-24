@@ -245,7 +245,7 @@ never lock anything). **Pressing the button** locks the admin area for 4 hours: 
 use it, including whoever is already signed in; customers keep shopping. The next run sends "The
 admin area is locked", with the time and the IP the button was pressed from.
 
-- The link is signed, works once and expires after 24 hours; a tampered link just gets "Not found".
+- The link is signed, works once, expires after 12 hours, and only the link in the newest alert works; a tampered link just gets "Not found".
 - The web side can **only lock**. Unlocking is `--unlock` on the server, or waiting.
 - Worst case, someone who can read your alerts presses it: the admin area is locked for a few hours,
   and you are told at once.
@@ -500,7 +500,7 @@ is at the end of the config template.
 | `page_watch_hours` / `page_links` | 1 / on | Hours between page reads / whether new outside links are reported |
 | `line_friends_warn` | 20 | Warn when the LINE account that sends alerts has more friends than this (0 = do not ask) |
 | `brake_url`, `brake_secret` | | Emergency brake (optional): the brake page's address, a secret of 32+ characters; see "Emergency brake" above |
-| `brake_hours` / `brake_link_hours` | 4 / 24 | Hours the admin area stays locked / hours a link stays valid |
+| `brake_hours` / `brake_link_hours` | 4 / 12 | Hours the admin area stays locked / hours a link stays valid |
 | `brake_allow_ips` | | IPs never locked out (e.g. your developer's fixed IP) |
 | `quiet_hours` / `daily_cap` | 6 / 10 | Repeat window / messages per day |
 | `heartbeat_days` | 7 | Days between "still on duty" messages (0 = never) |

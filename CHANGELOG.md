@@ -1,5 +1,20 @@
 # Changelog / 更新紀錄
 
+## Unreleased (1.6.0) — hardening from a security review
+
+- **Emergency brake links**: only the newest link works — issuing one makes the older ones answer
+  "replaced" — and `brake_link_hours` now defaults to 12 (was 24). An alert waiting to be re-sent is kept
+  in `state.json` without its link; it gets a fresh one when it goes out.
+  緊急煞車連結：只有最新的能用、預設 12 小時；等著補發的通知不存連結。
+- **Update windows are announced at once**: `--expect` (and extending a window) sends a notice right away,
+  quiet by default, so a window nobody on the team opened is seen while it is still open.
+  上傳預告一開始就發一則（安靜的），不是自己人開的馬上看得到。
+- **Page watch**: a redirect within the site is followed only over http(s), never from https down to
+  http, and only to the same port (http on 80 to https on 443 is still followed); requests are limited to
+  http and https.
+  網頁監看：同站轉址不能從 https 降成 http、不能換連接埠；只走 http／https。
+- Self-test: 322 checks.
+
 ## 1.5.0 — 2026-11-24
 
 - **Alerts in Japanese**: `'language' => 'ja'`. Every message, the Telegram buttons ("📖 通知が届いたら",

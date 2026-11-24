@@ -227,7 +227,7 @@ final class SecurityAlerts
             'brake_url'          => '',            // public address of examples/security-brake.php copied into your site
             'brake_secret'       => '',            // 32+ random characters, from an environment variable; never in a message
             'brake_hours'        => 4,
-            'brake_link_hours'   => 24,
+            'brake_link_hours'   => 12,            // only the newest link works anyway (1.6: 24 -> 12)
             'brake_allow_ips'    => array(),       // IPs never locked out (e.g. your developer's office), exact match
 
             /* Your own channel (Slack, ntfy, SMS…): function(string $text, int $level, bool $silent = false): bool.
@@ -701,6 +701,7 @@ final class SecurityAlerts
             $cur['until'] = max((int) $cur['until'], $this->now() + $minutes * 60);
             unset($cur['end']);
             $this->saveExpect($cur);
+            $this->announceExpect((int) $cur['from'], (int) $cur['until'], true);
             return array('ok' => true, 'until' => (int) $cur['until'], 'run' => null, 'why' => '');
         }
         $this->forceScan = true;
@@ -720,7 +721,26 @@ final class SecurityAlerts
         $this->saveExpect(array('from' => $now, 'until' => $now + $minutes * 60, 'files' => array(), 'more' => 0));
         $this->append('findings.ndjson', array('t' => $now, 'level' => self::LOG, 'kind' => 'system', 'key' => 'expect:open:' . $now,
             'title' => $this->t('exp_title'), 'lines' => array($this->t('exp_opened', date('m/d H:i', $now), date('H:i', $now + $minutes * 60))), 'status' => 'logged'));
+        $this->announceExpect($now, $now + $minutes * 60, false);
         return array('ok' => true, 'until' => $now + $minutes * 60, 'run' => $r, 'why' => '');
+    }
+
+    /**
+     * An update window was opened or extended: said at once, as a notice (quiet by default), so a window that
+     * nobody on the team opened is seen while it is still open, not only in its summary afterwards.
+     */
+    private function announceExpect($from, $until, $extended)
+    {
+        try
+        {
+            $msg = $this->composeMsg(array(array('level' => self::NOTICE, 'title' => $this->t($extended ? 'exp_extended_title' : 'exp_open_title'),
+                'lines' => array($this->t('exp_opened', date('m/d H:i', (int) $from), date('H:i', (int) $until)), $this->hint('exp_open_hint')))), $this->now());
+            $this->deliver($msg, self::NOTICE);
+        }
+        catch (Throwable $e)
+        {
+            /* the window itself is open either way */
+        }
     }
 
     /** Closes the update window now; the next run (call run() right after) sends the summary. @return bool false = no window was open */
@@ -864,6 +884,10 @@ final class SecurityAlerts
         {
             return $page(410, '<p>' . htmlspecialchars($this->t('brake_expired', (int) $this->cfg['brake_link_hours']), ENT_QUOTES, 'UTF-8') . '</p>');
         }
+        if ($check === 'replaced')
+        {
+            return $page(410, '<p>' . htmlspecialchars($this->t('brake_replaced'), ENT_QUOTES, 'UTF-8') . '</p>');
+        }
         $until = $this->adminLockedUntil();
         if ($check === 'used')
         {
@@ -881,7 +905,11 @@ final class SecurityAlerts
         return $page(200, '<p>' . htmlspecialchars($this->t('brake_done', $when($until)), ENT_QUOTES, 'UTF-8') . '</p>', true);
     }
 
-    /** A fresh brake link (valid `brake_link_hours`, once), or '' when the brake is not set up. */
+    /**
+     * A fresh brake link (valid `brake_link_hours`, once), or '' when the brake is not set up. Only the newest link
+     * works: issuing one makes the older ones stop working ('replaced'), so a link that leaked from an old message
+     * is no use to anybody.
+     */
     public function brakeLink()
     {
         if (!$this->brakeReady())
@@ -890,6 +918,7 @@ final class SecurityAlerts
         }
         $exp = $this->now() + (int) round(max(1.0, (float) $this->cfg['brake_link_hours']) * 3600);
         $nonce = bin2hex(random_bytes(8));
+        @file_put_contents($this->path('brake-latest.txt'), $nonce, LOCK_EX);
         $url = trim((string) $this->cfg['brake_url']);
         return $url . (strpos($url, '?') === false ? '?' : '&') . 't=' . $exp . '.' . $nonce . '.' . $this->brakeSign($exp, $nonce);
     }
@@ -904,7 +933,7 @@ final class SecurityAlerts
         return substr(hash_hmac('sha256', 'brake|' . (int) $exp . '|' . $nonce, (string) $this->cfg['brake_secret']), 0, 32);
     }
 
-    /** @return string 'ok' | 'expired' | 'used' | 'bad' */
+    /** @return string 'ok' | 'expired' | 'used' | 'replaced' (a newer link was issued since) | 'bad' */
     private function brakeToken($token)
     {
         if (!$this->brakeReady() || !preg_match('/^([0-9]{9,11})\.([0-9a-f]{16})\.([0-9a-f]{32})$/', $token, $m)
@@ -912,12 +941,18 @@ final class SecurityAlerts
         {
             return 'bad';
         }
-        if ((int) $m[1] < $this->now())
-        {
-            return 'expired';
-        }
         $used = $this->brakeUsed();
-        return isset($used[$m[2]]) ? 'used' : 'ok';
+        if (isset($used[$m[2]]))
+        {
+            return 'used';
+        }
+        $f = $this->cfg['state_dir'] . '/brake-latest.txt';
+        $latest = is_file($f) ? trim((string) @file_get_contents($f)) : '';
+        if ($latest !== '' && !hash_equals($latest, $m[2]))
+        {
+            return 'replaced';
+        }
+        return (int) $m[1] < $this->now() ? 'expired' : 'ok';
     }
 
     private function brakeUsed()
@@ -2689,6 +2724,10 @@ final class SecurityAlerts
                 $h = $this->hostOf($next);
                 if ($h !== '' && $this->ownHost($h, $url))
                 {
+                    if (!$this->sameSiteHop($cur, $next))
+                    {
+                        return array('ok' => false, 'body' => '', 'redirect' => '', 'why' => 'a redirect within the site to plain http or another port: not followed');
+                    }
                     $cur = $next;
                     continue;
                 }
@@ -2699,9 +2738,33 @@ final class SecurityAlerts
         return array('ok' => false, 'body' => '', 'redirect' => '', 'why' => 'too many redirects');
     }
 
-    /** @return array array(int $status, string $body, string $location); status 0 = no answer */
+    /**
+     * A redirect within the site is followed only when it keeps to http(s), never goes from https down to http,
+     * and keeps the port (http on 80 to https on 443 is the one change allowed): a page that answers with a
+     * redirect cannot send the reader to another service on the same machine.
+     */
+    private function sameSiteHop($from, $to)
+    {
+        $a = parse_url((string) $from);
+        $b = parse_url((string) $to);
+        $sa = is_array($a) && isset($a['scheme']) ? strtolower($a['scheme']) : '';
+        $sb = is_array($b) && isset($b['scheme']) ? strtolower($b['scheme']) : '';
+        if (!in_array($sb, array('http', 'https'), true) || ($sa === 'https' && $sb !== 'https'))
+        {
+            return false;
+        }
+        $pa = is_array($a) && isset($a['port']) ? (int) $a['port'] : ($sa === 'https' ? 443 : 80);
+        $pb = is_array($b) && isset($b['port']) ? (int) $b['port'] : ($sb === 'https' ? 443 : 80);
+        return $pa === $pb || ($sa === 'http' && $sb === 'https' && $pa === 80 && $pb === 443);
+    }
+
+    /** @return array array(int $status, string $body, string $location); status 0 = no answer. Only http and https. */
     private function requestPage($url, array $headers, $timeout, $max)
     {
+        if (!preg_match('#^https?://#i', (string) $url))
+        {
+            return array(0, '', '');
+        }
         if (!function_exists('curl_init'))
         {
             $ctx = stream_context_create(array('http' => array('method' => 'GET', 'header' => implode("\r\n", $headers), 'timeout' => $timeout,
@@ -2726,6 +2789,11 @@ final class SecurityAlerts
         $body = '';
         $loc = '';
         $ch = curl_init($url);
+        if (defined('CURLOPT_PROTOCOLS') && defined('CURLPROTO_HTTP') && defined('CURLPROTO_HTTPS'))
+        {
+            curl_setopt($ch, CURLOPT_PROTOCOLS, CURLPROTO_HTTP | CURLPROTO_HTTPS);
+            curl_setopt($ch, CURLOPT_REDIR_PROTOCOLS, CURLPROTO_HTTP | CURLPROTO_HTTPS);
+        }
         curl_setopt_array($ch, array(
             CURLOPT_HTTPHEADER => $headers, CURLOPT_HTTPGET => true, CURLOPT_FOLLOWLOCATION => false,
             CURLOPT_TIMEOUT => $timeout, CURLOPT_CONNECTTIMEOUT => min(5, $timeout), CURLOPT_ENCODING => '',
@@ -3149,7 +3217,12 @@ final class SecurityAlerts
                     /* Nothing could take the message (LINE down or refusing, and no e-mail). Keep it and try again
                        on the following runs: a one-time finding — a changed file, a new admin account — is seen
                        only once, so without this it would end up in the log and nowhere else. */
-                    $item = array('t' => $now, 'text' => $msg['plain'], 'msg' => $msg, 'urgent' => $urgent ? 1 : 0, 'n' => count($send), 'u' => 0, 'files' => 0);
+                    /* kept without its brake link (the link is a key; state.json is no place for one): a fresh
+                       link is added when it finally goes out */
+                    $keep = $msg;
+                    $keep['plain'] = $this->withoutBrake($msg);
+                    $keep['brake'] = '';
+                    $item = array('t' => $now, 'text' => $keep['plain'], 'msg' => $keep, 'urgent' => $urgent ? 1 : 0, 'n' => count($send), 'u' => 0, 'files' => 0);
                     foreach ($send as $i)
                     {
                         if ($findings[$i]['level'] >= self::URGENT) { $item['u']++; }
@@ -4994,6 +5067,9 @@ final class SecurityAlerts
                 'exp_window' => 'Update window %s–%s (announced on the server with --expect).',
                 'exp_none' => 'No code file changed during the window.',
                 'exp_hint' => 'Fine if this was your update. If nobody updated the site then, treat it as a break-in: someone on the server may have announced the window to hide these changes.',
+                'exp_open_title' => 'Update window opened',
+                'exp_extended_title' => 'Update window extended',
+                'exp_open_hint' => 'Until then, ordinary code changes come as one summary afterwards; anything that looks like a backdoor is still reported at once. Not your doing? Someone may want to slip changes in under it: treat it as a break-in.',
                 'page_home' => 'home page',
                 'page_code_title' => 'A page started using another site',
                 'page_new_script' => '%s: runs code from %s',
@@ -5022,6 +5098,7 @@ final class SecurityAlerts
                 'brake_expired' => 'This link has expired (a link works for %d hours). Use the link in a newer alert, or ask your developer to lock the admin area with --lock on the server.',
                 'brake_used' => 'This link has already been used. The admin area is locked until %s.',
                 'brake_used_open' => 'This link has already been used, and the lock has ended since. Use the link in a newer alert to lock again.',
+                'brake_replaced' => 'This link has been replaced: each new URGENT alert makes the older brake links stop working. Use the link in the latest alert.',
                 'brake_locked_title' => 'The admin area is locked',
                 'brake_locked_link' => 'Locked with the emergency link at %s, until %s (pressed from IP %s). Customers can still use the shop; nobody can use the admin area until then.',
                 'brake_locked_cmd' => 'Locked by command on the server at %s, until %s. Customers can still use the shop; nobody can use the admin area until then.',
@@ -5132,6 +5209,9 @@ final class SecurityAlerts
                 'exp_window' => '更新時段 %s～%s（在主機上用 --expect 預告的）。',
                 'exp_none' => '這段時間沒有程式檔變動。',
                 'exp_hint' => '是你們的更新就沒事。如果那段時間其實沒有人更新網站，請當成被入侵處理：可能是有人進了主機，用預告來掩護這些變動。',
+                'exp_open_title' => '開始上傳預告',
+                'exp_extended_title' => '上傳預告延長了',
+                'exp_open_hint' => '這段時間一般的程式變動會在結束後合成一則；內容像後門的照樣立刻通知。不是你們預告的：可能有人想趁機偷改程式，請當成被入侵處理。',
                 'page_home' => '首頁',
                 'page_code_title' => '網頁開始用到別的網站',
                 'page_new_script' => '%s：多了來自 %s 的程式',
@@ -5160,6 +5240,7 @@ final class SecurityAlerts
                 'brake_expired' => '這個連結已經過期（每個連結只能在 %d 小時內使用）。請用比較新的通知裡的連結，或請工程師在主機上用 --lock 鎖住後台。',
                 'brake_used' => '這個連結已經用過了。後台鎖到 %s。',
                 'brake_used_open' => '這個連結已經用過了，而且那次的鎖已經結束。要再鎖一次，請用比較新的通知裡的連結。',
+                'brake_replaced' => '這個連結已經換新了：每次有新的「緊急」通知，舊的煞車連結就不能用。請用最新一則通知裡的連結。',
                 'brake_locked_title' => '後台已經鎖住',
                 'brake_locked_link' => '%s 有人按了緊急煞車連結，鎖到 %s（從 IP %s 按的）。客人照常可以購物；在那之前任何人都不能用後台。',
                 'brake_locked_cmd' => '%s 在主機上用指令鎖住，鎖到 %s。客人照常可以購物；在那之前任何人都不能用後台。',
@@ -5270,6 +5351,9 @@ final class SecurityAlerts
                 'exp_window' => '予告された更新の時間：%s～%s（サーバーで --expect を使って予告）。',
                 'exp_none' => 'この時間内に変わったプログラムファイルはありません。',
                 'exp_hint' => '自分たちの更新なら問題ありません。その時間に誰も更新していなければ、侵入として扱ってください。サーバーに入った誰かが、これらの変更を隠すために予告したのかもしれません。',
+                'exp_open_title' => '更新の予告が始まった',
+                'exp_extended_title' => '更新の予告が延長された',
+                'exp_open_hint' => 'この間のふつうのプログラムの変更は、終わったあとに 1 通にまとめて届きます。バックドアらしいものは、すぐに通知します。自分たちの予告でなければ、誰かがこっそりプログラムを変えようとしているのかもしれません。侵入として扱ってください。',
                 'page_home' => 'トップページ',
                 'page_code_title' => 'ページがほかのサイトを使い始めた',
                 'page_new_script' => '%s：%s のプログラムを読み込んでいます',
@@ -5298,6 +5382,7 @@ final class SecurityAlerts
                 'brake_expired' => 'このリンクは期限切れです（リンクが使えるのは発行から %d 時間です）。もっと新しい通知のリンクを使うか、開発者にサーバーで --lock を実行して管理画面をロックしてもらってください。',
                 'brake_used' => 'このリンクはすでに使われています。管理画面は %s までロックされています。',
                 'brake_used_open' => 'このリンクはすでに使われていて、そのときのロックはもう終わっています。もう一度ロックするには、もっと新しい通知のリンクを使ってください。',
+                'brake_replaced' => 'このリンクは新しいものに置き換えられました。緊急の通知が届くたびに、古いブレーキのリンクは使えなくなります。最新の通知のリンクを使ってください。',
                 'brake_locked_title' => '管理画面がロックされた',
                 'brake_locked_link' => '%s に緊急ブレーキのリンクでロックされました（%s まで、IP %s から押されました）。お客さんはいつもどおり買い物できますが、それまでは誰も管理画面を使えません。',
                 'brake_locked_cmd' => '%s に、サーバーのコマンドでロックされました（%s まで）。お客さんはいつもどおり買い物できますが、それまでは誰も管理画面を使えません。',

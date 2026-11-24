@@ -650,7 +650,7 @@ that locks the admin area for a few hours while the shop stays open.
 'brake_url'       => 'https://example.com/security-brake.php',   // where you put examples/security-brake.php
 'brake_secret'    => getenv('ALERT_BRAKE_SECRET'),               // 32+ random characters
 'brake_hours'     => 4,
-'brake_link_hours'=> 24,
+'brake_link_hours'=> 12,
 'brake_allow_ips' => array(),                                    // exact IPs never locked out
 ```
 
@@ -675,7 +675,7 @@ How it behaves:
 
 | | |
 |---|---|
-| The link | Added as the last line of every URGENT message (never to notices or the check-in): `brake_url?t=<expiry>.<nonce>.<HMAC-SHA256>`. Valid for `brake_link_hours`, once. A delayed alert gets a fresh link. On Discord it sits after the code box so it can be tapped |
+| The link | Added as the last line of every URGENT message (never to notices or the check-in): `brake_url?t=<expiry>.<nonce>.<HMAC-SHA256>`. Valid for `brake_link_hours` (12), once, and only the newest link works: issuing one makes the older ones answer "replaced". A delayed alert gets a fresh link; alerts waiting to be re-sent are kept without theirs. On Discord it sits after the code box so it can be tapped |
 | Opening it (GET/HEAD) | A page that says what the button does, with the button. Nothing is locked: LINE and other chat apps open links to build previews |
 | The button (POST) | Locks for `brake_hours` (extends a running lock, never shortens it). The next run sends an URGENT "The admin area is locked", with the time and the IP the button was pressed from |
 | A bad, reused or expired link | "Not found" (no hint about the site), "already used", "expired" |

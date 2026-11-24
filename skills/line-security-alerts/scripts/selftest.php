@@ -1557,9 +1557,19 @@ $sd = tmpdir('state');
 $xcfg = array('timezone' => 'UTC', 'site_root' => $site, 'state_dir' => $sd, 'scan_hours' => 0, 'heartbeat_days' => 0);
 $a = make($box, $clock, $xcfg);
 $a->run();   // baseline
+/* the notice sent when a window opens (1.6) is checked here and then taken out, so the counts below stay about the files */
+$opened = function () use (&$box) {
+    $out = array();
+    foreach ($box['line'] as $i => $m) { if (preg_match('/【Notice】Update window (opened|extended)/u', $m)) { $out[] = $m; unset($box['line'][$i]); } }
+    $box['line'] = array_values($box['line']);
+    return $out;
+};
 file_put_contents($site . '/before.php', "<?php // changed before the announcement\n");
 $clock += 600;
 $e = $a->expectChanges(30);
+$ann = $opened();
+check('opening a window is said at once (quietly): until when, and what to do if it was not you', count($ann) === 1
+    && strpos($ann[0], 'Update window announced: 03/02 10:10 until 10:40.') !== false && strpos($ann[0], 'treat it as a break-in') !== false, json_encode($ann));
 check('announcing first runs every check: a change made BEFORE the announcement is reported as usual', $e['ok'] && $e['until'] === $clock + 1800
     && is_array($e['run']) && count($box['line']) === 1 && strpos($box['line'][0], 'before.php') !== false, json_encode(array($e, $box['line'])));
 file_put_contents($site . '/lib/new.php', "<?php // part of the update\n");
@@ -1587,6 +1597,7 @@ file_put_contents($site . '/after.php', "<?php // after the window\n");
 $clock += 300; $a->run();
 check('after the summary, changes are reported one by one again', count($box['line']) === 4 && strpos($box['line'][3], 'after.php') !== false);
 $a->expectChanges(60);
+$opened();
 file_put_contents($site . '/lib/new.php', "<?php // part of update 2\n");
 file_put_contents($site . '/lib/tmp.php', "<?php // made and removed during the update\n");
 $clock += 60; $a->run();
@@ -1600,7 +1611,9 @@ check('--expect off: closes at once, the summary comes with the next run; a file
 $e1 = $a->expectChanges(20);
 $clock += 60;
 $e2 = $a->expectChanges(60);
-check('announcing again while a window is open extends it (no second full check)', $e1['ok'] && $e2['ok'] && $e2['run'] === null && $e2['until'] === $clock + 3600);
+$ann = $opened();
+check('announcing again while a window is open extends it (no second full check), and says so', $e1['ok'] && $e2['ok'] && $e2['run'] === null
+    && $e2['until'] === $clock + 3600 && count($ann) === 2 && strpos($ann[1], 'Update window extended') !== false, json_encode($ann));
 $clock += 3700; $a->run();
 check('a window in which nothing changed closes quietly (it is only written to the log)', count($box['line']) === 5 && !is_file($sd . '/expect.json'));
 file_put_contents($sd . '/expect.json', json_encode(array('from' => $clock, 'until' => $clock + 10 * 365 * 86400, 'files' => array(), 'more' => 0)));
@@ -2382,6 +2395,50 @@ restore_error_handler();
 $answer = array();
 check('odd answers and odd records give no PHP warning (a non-text title, a malformed migrate answer, a broken channels.json, guide_url not a string)',
     $warn === array() && $s['telegram_moved'] === 2 && $tc['ok'] && count($tc['chats']) === 1, json_encode($warn));
+
+/* ------------------------------------------------------------------ */
+echo "Hardening (1.6)\n";
+$clock = strtotime('2026-03-02 10:00:00 UTC');
+$a = make($box, $clock, $brake);
+$l1 = $a->brakeLink();
+$l2 = $a->brakeLink();
+preg_match('/[?&]t=(([0-9]+)\.\S+)$/', $l1, $t1);
+preg_match('/[?&]t=(\S+)$/', $l2, $t2);
+$r1 = $a->brakeRequest('POST', isset($t1[1]) ? $t1[1] : '', '198.51.100.7');
+$g2 = $a->brakeRequest('GET', isset($t2[1]) ? $t2[1] : '', '198.51.100.7');
+check('only the newest brake link works: an older one answers "replaced" (410) and locks nothing; links live 12 hours',
+    $r1['status'] === 410 && strpos($r1['html'], 'has been replaced') !== false && !$a->adminLocked() && $g2['status'] === 200
+    && isset($t1[2]) && (int) $t1[2] === $clock + 12 * 3600, $r1['html']);
+$sdo = tmpdir('state-outbox');
+$a = make($box, $clock, array_merge($brake, array('state_dir' => $sdo, 'mail_to' => '')));
+$box['status'] = 500;
+$a->custom('Cannot go out now', array('x'), SecurityAlerts::URGENT, 'ob1');
+$clock += 60; $r = $a->run();
+$stj = (string) @file_get_contents($sdo . '/state.json');
+check('an alert waiting to be re-sent is kept without its brake link (no key in state.json)', $r['sent'] === 'failed'
+    && strpos($stj, 'Cannot go out now') !== false && strpos($stj, 'brake.php?t=') === false, substr($stj, 0, 300));
+$box['status'] = 200;
+$clock += 300; $a->run();
+$m = (string) end($box['line']);
+check('...and gets a fresh link when it finally goes out', strpos($m, 'Delayed') !== false && preg_match('#brake\.php\?t=\S+$#', $m) === 1, $m);
+$hop = function ($start, $to) use (&$box, &$clock) {
+    $seen = array();
+    $a = make($box, $clock, array('page_watch' => array($start), 'page_transport' => function ($url) use ($start, $to, &$seen) {
+        $seen[] = $url;
+        return $url === $start ? array(302, '', $to) : array(200, '<html><body>ok</body></html>', '');
+    }));
+    $r = $a->pagesNow();
+    $views = isset($r[$start]['views']) ? $r[$start]['views'] : array();
+    return array(array_values(array_unique($seen)), $views);
+};
+list($seen, $views) = $hop('https://shop.example/', 'http://shop.example/');
+check('page watch: a redirect within the site from https down to http is not followed', $seen === array('https://shop.example/')
+    && is_string(reset($views)) && strpos(reset($views), 'not followed') !== false, json_encode(array($seen, $views)));
+list($seen, $views) = $hop('https://shop.example/', 'https://shop.example:8443/admin');
+check('...nor one to another port', $seen === array('https://shop.example/'), json_encode($seen));
+list($seen, $views) = $hop('http://shop.example/', 'https://www.shop.example/');
+check('...while http to https (and adding www) is followed as before', $seen === array('http://shop.example/', 'https://www.shop.example/')
+    && is_array(reset($views)), json_encode(array($seen, $views)));
 
 /* ------------------------------------------------------------------ */
 echo "Daily cap, urgent bypass, fallback\n";
