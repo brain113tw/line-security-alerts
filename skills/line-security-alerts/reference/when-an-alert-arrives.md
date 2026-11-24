@@ -6,6 +6,7 @@ notes app on your phone. ([中文版](when-an-alert-arrives.zh-TW.md) / [日本�
 ## Three things first
 
 1. **Look at the level.** 【Notice】 means check when you have a moment. 【URGENT】 means deal with it now, not tomorrow.
+   (Normally only 【URGENT】 makes your phone ring; notices and the weekly check-in arrive quietly in the chat.)
 2. **Ask "was that us?"** Most notices are your own people: a deployment, a new phone, a busy refund day. Ask the person named. If yes, you are done.
 3. **If it was not you, follow the matching section below.** When unsure, treat it as "not us".
 
@@ -180,7 +181,8 @@ look at that page with your developer: links can be slipped in the same way as t
 
 ## The last line "🛑 Not your doing, and nobody to call? Lock the admin area…"
 
-(Only if your developer set up the emergency brake.)
+(Only if your developer set up the emergency brake. On Telegram it is the button "🛑 Lock the admin area
+for 4 hours" under the message; on Discord, the link in the last card.)
 
 **When to use it**: the alert above it is URGENT, it is not something you or your staff did, and you
 cannot reach your developer. Tap the link and press the button on the page. The admin area is then
@@ -266,6 +268,19 @@ intruder could send a message from your shop's account to all of those people.
 
 **Do**: create a new LINE Official Account used only for alerts (you and a few colleagues as friends)
 and have your developer switch the alerts to it. Keep the customer account for customers.
+
+### The line "Channels checked…" or "⚠ Not working right now: …"
+
+**What it means**: when your alerts have more than one place to go (say Telegram, with LINE as a
+backup), the check-in also makes sure each channel still works. Nothing is sent for that; the services
+are only asked.
+
+- "Channels checked without sending a message: … OK.": nothing to do.
+- **"⚠ Not working right now: …"**: the reason is in brackets (the bot was blocked, the webhook was
+  deleted, a recipient blocked the LINE account…). Alerts still reach you through the other channels,
+  but the backup is broken: have your developer fix it this week (`--test-all` shows them how). When it
+  says a recipient blocked the account, ask your colleagues first: someone may have blocked or removed
+  the alert account; adding it back is enough.
 
 ### An extra line: "⚠ The outside check-in address has failed…"
 

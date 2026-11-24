@@ -53,6 +53,13 @@ on its own and prints the reason next to the one that failed, e.g. `FAILED: HTTP
 | HTTP 429 | Monthly message quota used up (free plans have a small quota) or rate limit |
 | `line` but nothing on the phone | You have not added the account as a friend, or blocked it |
 
+That last row is the treacherous one: LINE answers a push to someone who blocked the account (or
+never added it) with success and delivers nothing. `--status`, and the weekly check-in whenever there
+is more than one place to send to, ask LINE about each recipient without sending (`GET
+/v2/bot/profile/{userId}`, or `/v2/bot/group/{groupId}/summary` for a group; 404 = not reachable) and
+say so. A notice that does not ring (`ring_level`, by default everything below URGENT) is pushed with
+`notificationDisabled: true`: it is in the chat, without a notification on the phone.
+
 To see the request itself, point `line_api_base` at `scripts/fake_line_server.php`.
 
 Telegram and Discord are set up in the README ("Telegram or Discord instead"). When several channels

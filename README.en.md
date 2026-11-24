@@ -49,6 +49,7 @@ Still on duty. Last 7 day(s): 2016 checks run, 4 thing(s) reported (1 urgent).
 Watching 1850 code files; last full scan 11/28 07:00.
 Code fingerprint: 3f9a-0c1d-77b2-e4a8. It comes with every check-in from now on; scroll up to compare with the one before.
 LINE messages this month: about 37 of 200 used.
+Channels checked without sending a message: LINE OK.
 Records go back to 2026-11-20. If that date is newer than you remember, the records were reset: ask why.
 You get this once a week. If a week passes without it, the checks have stopped running.
 ```
@@ -298,7 +299,7 @@ send one real test message.
 **To install a fixed, reviewed version** (advisable for a security tool), add the release tag:
 
 ```
-/plugin marketplace add brain113tw/line-security-alerts#v1.3.0
+/plugin marketplace add brain113tw/line-security-alerts#v1.4.0
 /plugin install line-security-alerts@line-security-tools
 ```
 
@@ -393,25 +394,48 @@ Whatever you use, keep the key like the LINE token: environment variable, not ve
 
 1. In Telegram, find `@BotFather` (the official one, with the blue check), send `/newbot` and answer
    its questions. You get a token like `123456789:AAH…`: that is `telegram_bot_token`.
-2. On your phone, open the new bot and tap START. For a group: add the bot to the group and send
-   `/start` there.
-3. Open `https://api.telegram.org/bot<token>/getUpdates` in a browser (your token in place of `<token>`)
-   and find the number after `"chat":{"id":`: that is `telegram_chat_id` (negative for a group).
-   The address contains your token: do not share a screenshot of it.
+2. On your phone, open the new bot and tap START. For a group: add the bot to the group. For one topic
+   of a group with topics: send `/start@YourBotName` in that topic.
+3. Run `php security-alerts-cron.php --telegram-chats`. It lists the people, groups and topics that
+   wrote to the bot lately; put the id of the one that should get the alerts into `telegram_chat_id`
+   (negative for a group; a topic looks like `-1001234567890/12`). It only reads: nothing is sent and
+   nothing is marked as read.
 4. Run `php security-alerts-cron.php --test-all`. If your phone buzzes, you are done.
+
+On Telegram, titles are bold, the "what to do" part is folded away until you tap it, and buttons sit
+under the message: "📖 What to do" on every alert and, on URGENT ones, "🛑 Lock the admin area for 4
+hours" (when the emergency brake is set up). Should Telegram refuse that layout, the same alert goes
+again at once as plain text, so a formatting slip never costs an alert. When a group is upgraded to a
+supergroup and gets a new id, messages follow it automatically and `--status` asks you to update the
+setting.
 
 ### Setting up Discord
 
 1. Open Server Settings → Integrations → Create Webhook, pick the channel that should get the
    alerts from the drop-down, then press Copy Webhook URL. You need permission to manage webhooks
    (you have it on a server you created).
-2. Put the address into `discord_webhook_url`.
+2. Put the address into `discord_webhook_url`. For one thread, or one post of a forum channel (a forum
+   channel needs one), add `?thread_id=<its id>` to the address (turn on Developer Mode under
+   Advanced, then right-click the thread → Copy Thread ID).
 3. On your phone, long-press the channel → Notification Settings → All.
 4. Run `php security-alerts-cron.php --test-all`.
 
-On Discord the message is shown in a grey code box. That keeps underscores and asterisks in file names
-from turning into formatting, and an account name containing `@everyone` or a fake link neither pings
-the whole server nor becomes something to click.
+On Discord every finding is a card: red for URGENT, orange for a notice, green for the check-in. The
+facts sit in a code box, which keeps underscores and asterisks in file names from turning into
+formatting, and an account name containing `@everyone` or a fake link neither pings the whole server
+nor becomes something to click. "What to do" has a box of its own; the brake and guide links are in a
+last card. Once Discord says a webhook does not exist (it was deleted), it is not tried again —
+Discord restricts senders that keep trying — and `--status` asks you for a new one.
+
+### Only urgent alerts ring
+
+By default only URGENT alerts make the phone ring. Notices and the weekly check-in still arrive, quietly:
+LINE shows no notification, Telegram notifies without a sound, Discord shows no notification, only
+the unread mark. Nobody is woken at night because a colleague uploaded a file, and the one sound that
+does come is taken seriously.
+
+For notices to ring too, set `'ring_level' => 1`; for everything, the check-in included, `0`.
+URGENT alerts and test messages always ring; e-mail is not affected.
 
 ### Several channels set up: where does a message go?
 
@@ -430,11 +454,26 @@ weekly check-in go to Telegram, Discord or e-mail. With 1, only the weekly check
 nothing but LINE is set up, LINE is still used (better than nowhere) and `--status` points it out.
 
 `--test-all` sends a test to every channel that is set up, each on its own, and says why one failed
-(for example "HTTP 401: Unauthorized" = wrong token). `--test` sends one message the way a notice
-would go and says which channel took it.
+and what to do about it (for example "HTTP 403: Forbidden: bot was blocked by the user", then "open
+the bot in Telegram and tap Restart"). `--test` sends one message the way a notice would go and says
+which channel took it.
+
+**Backups are checked too.** A backup is only used when the main channel fails — the worst moment to
+find out it stopped working weeks ago. So when a message has more than one place to go, the weekly
+check-in also makes sure every channel still answers, and says so in one line ("Channels checked
+without sending a message: Telegram, Discord, LINE OK."). Nothing is sent for it: Telegram shows
+"typing…" for a moment, Discord and LINE are only asked. A channel that stopped working (bot blocked,
+webhook deleted, a LINE recipient who blocked the account…) turns the check-in into a warning, and
+`--status` says what to do. LINE needs this most: a push to someone who blocked the account is still
+answered "sent", and never arrives.
+
+**Several websites:** they can share one bot or channel; a different `site_name` each tells them
+apart. To keep them apart: a Telegram group with topics, each site with its own topic id
+(`-1001234567890/12`, `-1001234567890/13`); on Discord, a thread (`?thread_id=`) or a webhook per site.
 
 **Other channels (Slack, SMS…):** set `notifier` to a function of your own. It is tried first; when it
-succeeds nothing else is used. The shape is at the end of the config template.
+succeeds nothing else is used. It is told whether the message should ring (third argument). The shape
+is at the end of the config template.
 
 ## Main settings
 
@@ -442,9 +481,12 @@ succeeds nothing else is used. The shape is at the end of the config template.
 |---|---|---|
 | `state_dir` | (required) | Logs and fingerprints; ideally outside the web root |
 | `line_channel_access_token`, `line_to` | | LINE token and recipients (environment variables, not version control) |
-| `telegram_bot_token`, `telegram_chat_id` | | Telegram bot token and chat (optional); token in an environment variable |
-| `discord_webhook_url` | | Discord channel webhook address (optional); the address itself is the key |
+| `telegram_bot_token`, `telegram_chat_id` | | Telegram bot token and chat (optional; `--telegram-chats` lists the ids, a topic is `-100…/12`); token in an environment variable |
+| `discord_webhook_url` | | Discord channel webhook address (optional; add `?thread_id=` for a thread); the address itself is the key |
 | `line_min_level` | 0 | Which messages may use LINE: 0 = all; 1 = not the weekly check-in; 2 = URGENT only (tried on LINE first) |
+| `ring_level` | 2 | Which messages ring: 2 = URGENT only; 1 = notices too; 0 = all, the check-in included. The others arrive quietly |
+| `rich_messages` | on | Bold titles and buttons on Telegram, coloured cards on Discord; off = plain text everywhere, as before |
+| `guide_url` | `auto` | Where the "What to do" button points: `auto` = this package's guide on GitHub (in your language); empty = no button; or your own copy |
 | `mail_to` | | E-mail, when every other channel fails |
 | `language` | `en` | `en` or `zh-TW` |
 | `site_root`, `exclude_dirs`, `upload_dirs`, `runtime_dirs` | | File-scan scope; exclude cache folders |
@@ -478,12 +520,13 @@ The full list is `SecurityAlerts::defaults()`. Thresholds are starting points �
 php skills/line-security-alerts/scripts/selftest.php
 ```
 
-261 scenario checks (logins, devices, accounts, firewall, money, files, web-shell patterns, weekly
+311 scenario checks (logins, devices, accounts, firewall, money, files, web-shell patterns, weekly
 check-in and fingerprint, wiped or edited records, upgrading old fingerprints, outside check-in,
 quarantine, timestamps put back, delayed delivery, non-UTF-8 names, daily cap, e-mail fallback,
 Telegram / Discord order, long messages in parts, "too many requests", update windows, LINE friend
-count, page watch read four ways and links shown only to the crawler, the emergency brake…), no network. On every change GitHub runs them again on Linux (PHP 7.4–8.5)
-and Windows.
+count, page watch read four ways and links shown only to the crawler, the emergency brake, who rings,
+Telegram layout and buttons, Discord cards, groups that moved, deleted webhooks, channel checks…), no
+network. On every change GitHub runs them again on Linux (PHP 7.4–8.5) and Windows.
 
 > **⚠️ Your antivirus may raise a warning — that is expected**
 >
@@ -510,7 +553,9 @@ php -S 127.0.0.1:18765 skills/line-security-alerts/scripts/fake_line_server.php
 and set `'line_api_base' => 'http://127.0.0.1:18765'`; messages are printed in that terminal. The same
 fake server also plays the outside check-in service (`'ping_url' => 'http://127.0.0.1:18765/ping/test'`),
 so you can try that without signing up anywhere. It plays Telegram and Discord too, including
-"too many requests", server errors and slow answers (see the top of `scripts/fake_line_server.php`).
+"too many requests", server errors, slow answers, a blocked bot, a group that moved and a forum
+channel, and checks Telegram's HTML, button addresses and Discord's card limits the way they do
+(see the top of `scripts/fake_line_server.php`).
 It also has a fake shop at `/shop/`: open `/shop/hack` and it turns "hacked" (a skimming script, links
 only the crawler gets, visitors from Google redirected away), for trying the page watch.
 

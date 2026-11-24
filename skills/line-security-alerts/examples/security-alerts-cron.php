@@ -5,10 +5,14 @@
 //
 //   php security-alerts-cron.php               run every check now
 //   php security-alerts-cron.php --status      where things stand: last run, files watched, what was reported,
-//                                              anything waiting, anything that needs a look (sends nothing)
+//                                              anything waiting, whether each channel answers, anything that needs
+//                                              a look (sends no message; Telegram shows "typing…" for a moment)
 //   php security-alerts-cron.php --test        send one test message (it goes where a notice would go)
 //   php security-alerts-cron.php --test-all    send the test message to EVERY channel that is set up, each on
-//                                              its own, and say which one failed and why (for setting up)
+//                                              its own, and say which one failed, why, and what to do (for setting up)
+//   php security-alerts-cron.php --telegram-chats
+//                                              the chats that wrote to the Telegram bot lately, with the id to put
+//                                              into telegram_chat_id (for setting up; sends nothing)
 //   php security-alerts-cron.php --rebaseline  forget file fingerprints (after a big deployment you trust)
 //   php security-alerts-cron.php --audit       read every code file and list the ones that look suspicious
 //                                              (once after installing: the first run trusts what is already there)
@@ -42,6 +46,7 @@ $arg = isset($argv[1]) ? $argv[1] : '';
 if ($arg === '--status')
 {
     $alerts->lineFriendCount();   // asks LINE how many people the alert account reaches (remembered; status() reports it)
+    $checked = $alerts->checkChannels();   // each channel asked whether it would take a message, without sending one
     $s = $alerts->status(10);
     $at = function ($t) { return $t ? date('Y-m-d H:i', $t) : 'never'; };
     $ago = function ($t) use ($s) {
@@ -65,6 +70,19 @@ if ($arg === '--status')
     echo '  alerts go to      : ' . $path($d['route']['notice']) . ($d['mail'] ? '' : '  (no e-mail fallback)') . "\n";
     if ($d['route']['urgent'] !== $d['route']['notice']) { echo '  urgent ones       : ' . $path($d['route']['urgent']) . '  (line_min_level ' . $d['line_min_level'] . ")\n"; }
     if ($d['route']['checkin'] !== $d['route']['notice']) { echo '  check-in goes to  : ' . $path($d['route']['checkin']) . "\n"; }
+    if ($checked)
+    {
+        $short = array('custom' => 'notifier', 'telegram' => 'Telegram', 'discord' => 'Discord', 'line' => 'LINE', 'mail' => 'e-mail');
+        $words = array();
+        foreach ($checked as $ch => $h)
+        {
+            $words[] = $short[$ch] . ' ' . ($h['ok'] === true ? 'ok' : ($h['ok'] === false ? 'PROBLEM (see below)' : '(cannot be checked without sending)'));
+        }
+        echo '  channels answer   : ' . implode(', ', $words) . "\n";
+    }
+    $quiet = array(0 => 'every message rings', 1 => 'the weekly check-in arrives quietly', 2 => 'only URGENT alerts ring; notices and the check-in arrive quietly');
+    $ring = max(0, min(2, isset($config['ring_level']) ? (int) $config['ring_level'] : (int) SecurityAlerts::defaults()['ring_level']));
+    echo '  ringing           : ' . $quiet[$ring] . "\n";
     if ($s['line_friends'] !== null) { echo '  LINE account      : about ' . $s['line_friends']['n'] . " friend(s) can receive its messages\n"; }
     echo '  sent today        : ' . $s['sent_today'] . ' of ' . $s['daily_cap'] . " (urgent ones are not limited)\n";
     echo '  waiting to re-send: ' . $s['waiting']['count'] . ($s['waiting']['count'] ? ', oldest from ' . $at($s['waiting']['oldest']) : '') . "\n";
@@ -114,6 +132,10 @@ if ($arg === '--test-all')
     foreach ($all as $ch => $res)
     {
         echo '  ' . str_pad($ch === 'custom' ? 'notifier' : $ch, 9) . ($res['ok'] ? 'sent' : 'FAILED: ' . $res['why']) . "\n";
+        if (!$res['ok'] && $res['hint'] !== '')
+        {
+            echo '           what to do: ' . $res['hint'] . "\n";
+        }
     }
     if (!$all) { echo "  no channel is set up\n"; }
     $friends = $alerts->lineFriendCount();
@@ -126,6 +148,35 @@ if ($arg === '--test-all')
     }
     $bad = count(array_filter($all, function ($res) { return !$res['ok']; }));
     exit(!$all || $bad ? 1 : 0);
+}
+if ($arg === '--telegram-chats')
+{
+    $r = $alerts->telegramChats();
+    foreach ($r['moved'] as $old => $new)
+    {
+        echo 'The group ' . $old . ' became a supergroup: its id is now ' . $new . ' (alerts already go there). Put ' . $new . " into telegram_chat_id.\n";
+    }
+    if (!$r['ok'])
+    {
+        echo 'could not read the bot\'s chats: ' . $r['why'] . "\n";
+        exit(1);
+    }
+    if (!$r['chats'])
+    {
+        echo "No chat has written to this bot lately (Telegram keeps them about a day).\n"
+            . "  For yourself: open the bot in Telegram and press Start (or send it any message).\n"
+            . "  For a group: add the bot to the group (or send /start@YourBotName there). For a topic: send /start@YourBotName in that topic.\n"
+            . "Then run --telegram-chats again.\n";
+        exit(1);
+    }
+    echo "Chats that wrote to this bot lately:\n";
+    foreach ($r['chats'] as $c)
+    {
+        echo '  ' . str_pad($c['id'], 22) . ' ' . str_pad($c['type'], 11) . ' ' . $c['name'] . "\n";
+    }
+    echo "Put the id you want into telegram_chat_id (several: an array of them), then run --test-all.\n"
+        . "A topic id looks like -1001234567890/12: the message goes into that topic of the group.\n";
+    exit(0);
 }
 if ($arg === '--expect')
 {

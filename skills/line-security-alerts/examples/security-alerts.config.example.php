@@ -28,10 +28,19 @@ return array(
     /* Telegram and Discord (optional; leave empty to not use them). Setup steps are in the README.
        A message goes to the first channel that takes it: Telegram, then Discord, then LINE, then e-mail. */
     'telegram_bot_token'  => (string) getenv('TELEGRAM_ALERT_TOKEN'),      // "123456789:ABC…" from @BotFather
-    'telegram_chat_id'    => (string) getenv('TELEGRAM_ALERT_CHAT'),       // e.g. 123456789 (you) or -1001234567890 (a group)
-    'discord_webhook_url' => (string) getenv('DISCORD_ALERT_WEBHOOK'),     // https://discord.com/api/webhooks/…
+    'telegram_chat_id'    => (string) getenv('TELEGRAM_ALERT_CHAT'),       // e.g. 123456789 (you), -1001234567890 (a group),
+                                                                           // -1001234567890/12 (topic 12 of that group); --telegram-chats lists them
+    'discord_webhook_url' => (string) getenv('DISCORD_ALERT_WEBHOOK'),     // https://discord.com/api/webhooks/… (add ?thread_id=… for one
+                                                                           // thread, or one post of a forum channel)
     // 'line_min_level'   => 2,     // keep LINE for URGENT alerts only (tried there first); everything else goes to
                                     // Telegram / Discord / e-mail. 1 = everything except the "all is well" weekly check-in.
+
+    /* How messages sound and look. Only URGENT alerts ring by default; notices and the weekly check-in arrive
+       quietly (in the chat all the same). Telegram gets bold titles, the advice folded away and buttons (the
+       emergency brake, "what to do"); Discord gets one coloured card per finding. LINE and e-mail stay plain text. */
+    // 'ring_level'    => 1,          // 1 = notices ring too; 0 = everything rings, the check-in included
+    // 'rich_messages' => false,      // plain text on Telegram and Discord too, as before 1.4
+    // 'guide_url'     => '',         // no "what to do" button; or the address of your own copy of the guide
 
     /* If the channels above refuse (no token, monthly quota used up), alerts go here instead. */
     'mail_to'   => (string) getenv('ALERT_MAIL_TO'),
@@ -111,9 +120,10 @@ return array(
 
     /* Optional: a channel that is not built in — Slack, ntfy, SMS… It is tried before all the others.
        Return true when the message was accepted; return false and the next channel is used as usual.
-       $level: 0 = weekly check-in, 1 = notice, 2 = urgent. Check your service's documentation for the
-       exact request it wants; this is only the shape. */
-    // 'notifier' => function ($text, $level) {
+       $level: 0 = weekly check-in, 1 = notice, 2 = urgent. $silent: true when this one should not ring
+       (see ring_level), if your service can send quietly. Check your service's documentation for the exact
+       request it wants; this is only the shape. */
+    // 'notifier' => function ($text, $level, $silent = false) {
     //     $ch = curl_init((string) getenv('ALERT_WEBHOOK_URL'));
     //     curl_setopt_array($ch, array(CURLOPT_POST => true, CURLOPT_RETURNTRANSFER => true, CURLOPT_TIMEOUT => 8,
     //         CURLOPT_HTTPHEADER => array('Content-Type: application/json'), CURLOPT_POSTFIELDS => json_encode(array('text' => $text))));

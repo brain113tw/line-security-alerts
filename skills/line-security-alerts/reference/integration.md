@@ -229,6 +229,8 @@ register_shutdown_function(function () {
 | `expect.json` | an announced update window (`--expect`) and the changes collected in it; removed when its summary is sent |
 | `line-friends.json` | the last answer to "how many friends does the alert account have" |
 | `brake.json`, `brake-used.json` | the emergency lock (until when) and the brake links already used |
+| `channels.json` | the last channel check (`checkChannels()`): per channel ok / not, a short code and the reason |
+| `discord-gone.json` | Discord addresses that answered 404: a SHA-256 of the address → when, and whether the webhook or the thread was missing (never the address) |
 | `.htaccess`, `index.html` | deny-all for Apache, empty index |
 
 The check-in address (`ping_url`) is not written to any of them.
@@ -243,8 +245,9 @@ LINE account's friend count, and the latest findings with how each was delivered
 `!!` need a look (no run for a while, nowhere to send to, no fallback e-mail, alerts stuck, check-in
 address failing, a page view failing again and again, an alert account with many friends…); the exit
 code is 1 when there is at least one. The token, the recipient ids and the check-in address are never
-printed. The command-line `--status` asks LINE for the friend count first (one GET); `status()` itself
-only reads what is on disk.
+printed. The command-line `--status` first asks LINE for the friend count (one GET) and checks every
+channel without sending a message (`checkChannels()`, section 13), then prints whether each answers and
+who rings; `status()` itself only reads what is on disk.
 
 ### LINE's monthly allowance
 
@@ -423,10 +426,20 @@ The detection does not depend on LINE; only the last step does.
 
 ```php
 'telegram_bot_token'  => getenv('TELEGRAM_ALERT_TOKEN'),   // "123456789:AAH…" from BotFather
-'telegram_chat_id'    => getenv('TELEGRAM_ALERT_CHAT'),    // a number, negative for a group; or an array
-'discord_webhook_url' => getenv('DISCORD_ALERT_WEBHOOK'),  // https://discord.com/api/webhooks/…; or an array
+'telegram_chat_id'    => getenv('TELEGRAM_ALERT_CHAT'),    // a number, negative for a group, "-100…/12" for topic 12; or an array
+'discord_webhook_url' => getenv('DISCORD_ALERT_WEBHOOK'),  // https://discord.com/api/webhooks/… (?thread_id=… for a thread); or an array
 'line_min_level'      => 2,                                // optional: LINE for URGENT only
+'ring_level'          => 2,                                // default: only URGENT alerts ring
+'rich_messages'       => true,                             // default: HTML + buttons on Telegram, cards on Discord
+'guide_url'           => 'auto',                           // default: the "What to do" button → when-an-alert-arrives on GitHub
 ```
+
+Finding the chat id: `php security-alerts-cron.php --telegram-chats` (`telegramChats()`) calls
+`getUpdates` without an offset — nothing is marked as read — and lists every chat in it (person, group,
+supergroup, channel, and `id/topic` for a message in a forum topic, named from the topic's creation
+message). Telegram keeps updates for 24 hours. In a group, a bot in privacy mode sees the service
+message of being added and commands addressed to it (`/start@YourBot`), which is enough. A bot that has
+a webhook set answers 409; that is explained instead of listed.
 
 A message goes to **one** channel: the first in this order that takes it — your `notifier`, Telegram,
 Discord, LINE, e-mail (only the ones that are set up). When all of them fail, the message waits in the
@@ -439,18 +452,54 @@ used, and `--status` says so. The "LINE messages this month" line of the weekly 
 when LINE is really in use: the main channel, the one kept for urgent alerts, or a backup that had to
 carry something since the last check-in.
 
+**Who rings (`ring_level`).** A message below `ring_level` is sent quietly: LINE push with
+`notificationDisabled: true` (no notification), Telegram `disable_notification: true` (a notification
+without sound), Discord flag `4096` SUPPRESS_NOTIFICATIONS (no push or desktop notification, only the
+unread mark). Levels: the check-in 0 (1 when it carries a ⚠), notices 1, URGENT 2. The default 2 means
+only URGENT alerts ring; `ring_level` is capped at 2, so URGENT always rings, and test messages always
+ring. A message that rings is sent exactly as in 1.3 (no extra field). E-mail is not affected; a
+`notifier` gets `$silent` as its third argument.
+
 How the two are sent:
 
-- **Telegram**: `POST {telegram_api_base}/bot<token>/sendMessage` with `chat_id`, `text` and
-  `link_preview_options: {is_disabled: true}`. No `parse_mode`: plain text, so `_` and `*` in a file
-  name stay as they are. Messages over 4096 characters (UTF-16 units: an emoji counts twice) go in
-  numbered parts. A reply with `"ok": false` counts as failed.
-- **Discord**: `POST <webhook address>` with `content`, `allowed_mentions: {parse: []}` (an
-  `@everyone` in an account or file name pings nobody) and `flags: 4` (no link previews). The text is
-  wrapped in a code block, because Discord reads markdown everywhere: `__init__.php` would come out
-  underlined and `[text](https://…)` in an account name would become a disguised link. Three backticks
-  inside the text are broken up so they cannot close the block. 2000 characters per message; longer
-  ones go in numbered parts, each its own block. `204 No Content` is success.
+- **Telegram**: `POST {telegram_api_base}/bot<token>/sendMessage` with `chat_id`, `text`,
+  `link_preview_options: {is_disabled: true}`, and `message_thread_id` for a topic. With
+  `rich_messages` (default): `parse_mode: HTML` using only `<b>`, `<i>` and `<blockquote expandable>`
+  (Bot API 7.4+; the advice lines, folded until tapped), every text escaped (`<`, `>`, `&`), and an
+  `inline_keyboard` of URL buttons: the emergency brake on URGENT alerts (when set up; the link is then
+  not repeated in the text) and "What to do" (`guide_url`) on alerts. Any 400 to that — HTML Telegram
+  does not take, a button address it refuses — sends the same message again at once as plain text
+  (no `parse_mode`, the brake link as the last line), so a formatting slip never costs an alert; other
+  refusals (blocked, kicked, 5xx) go on to the next channel. Plain text, as before: `_` and `*` in a file
+  name stay as they are; over 4096 characters (UTF-16 units: an emoji counts twice) the plain form is
+  used, in numbered parts. A reply with `"ok": false` counts as failed. A 400 with
+  `parameters.migrate_to_chat_id` (a group upgraded to a supergroup; only a `-100…` id is accepted) is
+  followed once, at once — on every message: nothing is stored, so no file on the server can send alerts
+  somewhere else. The channel check notices the move, `--status` then asks to update `telegram_chat_id`,
+  and `--telegram-chats` asks Telegram for the new id.
+- **Discord**: `POST <webhook address>?wait=true` (Discord answers once the message is saved; `?wait`
+  is added to an existing `?thread_id=`) with `allowed_mentions: {parse: []}` (an `@everyone` in an
+  account or file name pings nobody). With `rich_messages`: one embed per finding, coloured by level
+  (red `#D92D20` URGENT, orange `#F79009` notice, green `#12B76A` check-in, blue `#2E90FA` test), the
+  facts in a code block in the description, the advice in a field of its own, and a last embed with
+  the brake and guide links as masked links (`[text](address)`: a link inside an embed gets no preview).
+  The message `content` is the header and the finding titles (what a phone notification shows, and all
+  that is left for someone whose Discord hides embeds). Flags `0`, or `4096` when quiet — never `4`,
+  which would hide the embeds. More than 10 embeds or 5,800 characters in all, or a 400, and the plain
+  form is used: the text in a code block (Discord reads markdown everywhere: `__init__.php` would come
+  out underlined and `[text](https://…)` in an account name would become a disguised link),
+  `flags: 4` (no link previews) plus `4096` when quiet, 2000 characters per message, longer in numbered
+  parts, the brake line — the one the module wrote, never a finding line that looks like it — after the
+  block. Inside every code block each backtick is followed by an invisible zero-width space, so no run
+  of backticks in a name can close the block early. `200` (with `?wait=true`) or `204` is success.
+  The User-Agent is `DiscordBot (https://github.com/brain113tw/line-security-alerts, <version>)`.
+  **A 404** means the webhook does not exist. Discord's rate-limit documentation asks callers not to use
+  such a webhook again (repeated tries earn a temporary restriction), so a SHA-256 of the address goes
+  into `discord-gone.json` and the webhook is skipped (and not checked) until the address changes;
+  `--status` asks for a new one. A test sent by a person (`--test`, `--test-all`) tries it once more and
+  clears the mark when it works. A 404 about the thread named by `?thread_id=` (code 10003) is
+  remembered the same way but reported as a wrong thread id, not a deleted webhook. A webhook of a forum
+  channel needs `?thread_id=`; without it Discord answers 400 code 220001, which `--test-all` explains.
 - **Too many requests (429)**: when the service asks for a short wait (3 seconds at most) the module
   waits and tries once more; a longer wait is not sat out (this may run inside a page view): the
   message goes on to the next channel at once.
@@ -458,17 +507,37 @@ How the two are sent:
   neither is ever written to a record, an error reason or `--status`; a reason the service sends back
   is cleaned of both before it is shown. `line_timeout` is the time limit for all three services.
 
+**Checking the channels without sending (`checkChannels()`).** Run by `--status`, and by the weekly
+check-in whenever a message has more than one place to go (a backup channel, or several chats /
+webhooks / recipients): a backup is only used when the main channel fails, the worst moment to find out
+it stopped working weeks ago. The check-in asks at most once in 20 hours (a check-in that could not go
+out is retried on every run; the channels are not asked again each time). Nothing is sent:
+
+| Channel | Asks | Catches |
+|---|---|---|
+| Telegram | `getChat`, then `sendChatAction` `typing` (with the topic); in a channel (which cannot show "typing…") `getChatMember` for the bot itself | wrong token, chat not found, bot kicked, **bot blocked**, topic deleted, group moved, a channel where the bot lost "Post messages" |
+| Discord | `GET` the webhook address without its query (no auth needed) | webhook deleted (404, then remembered), wrong token (401) |
+| LINE | `GET /v2/bot/info`, then `/v2/bot/profile/{U…}` or `/v2/bot/group/{C…}/summary` per recipient, then the monthly allowance (with `line_quota_check`) | wrong / revoked token (401), **a recipient who blocked the account or never added it** (404) — LINE answers a push to them with 200 and delivers nothing — and an allowance that is used up |
+| e-mail, notifier | — | cannot be checked without sending (`ok: null`) |
+
+The check-in then says "Channels checked without sending a message: Telegram, Discord, LINE OK." or
+turns into a warning naming the channel and why; the result is kept in `channels.json` for `--status`.
+Telegram's error texts are not part of its documented contract ("subject to change"); one that is not
+recognised is reported as it came, with the general advice.
+
 `php security-alerts-cron.php --test-all` sends the test message to each channel on its own and
 prints, per channel, `sent` or the service's reason ("HTTP 401: Unauthorized" = wrong token,
 "HTTP 400: Bad Request: chat not found" = wrong chat id or the bot was never started,
-"HTTP 404: Unknown Webhook" = the webhook was deleted). The fake server in `scripts/` plays both
-services, including 429, 500 and a slow answer; the modes are listed at the top of that file.
+"HTTP 404: Unknown Webhook" = the webhook was deleted), followed by what to do about it. The fake server
+in `scripts/` plays both services, including 429, 500, a slow answer, a blocked bot, a group that moved,
+a forum channel and HTML or cards that the real services would refuse; the modes are listed at the top
+of that file.
 
 For anything else (Slack, ntfy, SMS…) there is `notifier`:
 
 ```php
-'notifier' => function ($text, $level) {      // 0 = weekly check-in, 1 = notice, 2 = urgent
-    return my_send_somewhere($text);          // true = delivered; false = let the next channel try
+'notifier' => function ($text, $level, $silent = false) {   // 0 = weekly check-in, 1 = notice, 2 = urgent
+    return my_send_somewhere($text, $silent);                // true = delivered; false = let the next channel try
 },
 ```
 

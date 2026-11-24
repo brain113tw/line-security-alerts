@@ -1,5 +1,60 @@
 # Changelog / 更新紀錄
 
+## 1.4.0 — 2026-11-24
+
+- **Only URGENT alerts ring** (`ring_level`, default 2). Notices and the weekly check-in still arrive,
+  quietly: LINE without a notification (`notificationDisabled`), Telegram without a sound
+  (`disable_notification`), Discord without a notification (flag 4096). URGENT alerts and test
+  messages always ring. `1` = notices ring too; `0` = everything, as before. A `notifier` gets
+  `$silent` as its third argument.
+  只有緊急的會響；一般通知和每週報平安一樣送到，只是不響。想跟以前一樣全部都響：`'ring_level' => 0`。
+- **Telegram, easier to read**: bold titles, the advice folded away in a quote that opens on a tap,
+  and buttons under the message — "🛑 Lock the admin area for N hours" on URGENT alerts (with the
+  emergency brake set up) and "📖 What to do" (`guide_url`, by default this package's guide). Anything
+  Telegram refuses (a 400) is sent again at once as plain text.
+  Telegram：粗體標題、「該怎麼做」收起來點了才展開、煞車和說明做成按鈕；排版被拒就自動改純文字重發。
+- **Discord, as cards**: one card per finding — red URGENT, orange notice, green check-in — the facts
+  in a code block, the advice in a box of its own, the brake and guide links in a last card. Too much
+  for cards, or refused: the plain form as before. Sent with `?wait=true`, so "accepted" means saved. A
+  webhook that Discord says does not exist (404) is not tried again until its address changes, as
+  Discord asks; `--status` asks for a new one.
+  Discord：每件事一張彩色卡片；被刪掉的 Webhook 不再一直試（Discord 規定一直試會被暫時封鎖）。
+- **Easier setup**: `--telegram-chats` lists the people, groups and topics that wrote to the bot, with
+  the id to use (nothing is sent, nothing marked as read). `--test-all` adds what to do about each
+  failure. A Telegram group that became a supergroup is followed to its new id at once and `--status`
+  asks to update the setting. A Discord forum channel without `?thread_id=` is explained.
+  設定更簡單：`--telegram-chats` 直接列出聊天室代號；`--test-all` 失敗時寫出怎麼修；群組升級自動跟過去。
+- **Backups checked without sending**: whenever a message has more than one place to go, the weekly
+  check-in asks every channel whether it still works — Telegram shows "typing…" for a moment, the
+  Discord webhook and LINE's key and recipients are only asked — and says so in one line, or warns.
+  LINE answers "sent" even to a recipient who blocked the account; this is how that shows up.
+  `--status` runs the same check (`checkChannels()`).
+  備援管道每週檢查一次（不發訊息）；LINE 收件人封鎖了帳號也查得出來。
+- **Several sites in one place**: Telegram topics (`telegram_chat_id` like `-1001234567890/12`) and
+  Discord threads (`?thread_id=` on the webhook address).
+  好幾個網站：用 Telegram 的主題、Discord 的討論串分開放。
+- `'rich_messages' => false` keeps plain text on Telegram and Discord. LINE and e-mail get exactly the
+  same text as in 1.3.
+- **Fixed (Discord, since 1.2 / 1.3)**: a name with five or more backticks in a row could end the code
+  block early and put a working link inside an alert; a finding line that imitated the emergency-brake
+  line was placed after the block like the real one; and a very long such line could make the plain
+  form loop until PHP ran out of memory, so nothing was sent. Every backtick inside a block is now
+  followed by an invisible space, only the brake line the module wrote goes after the block, and
+  message parts can no longer come out empty. Upgrade recommended if you use Discord.
+  修正 Discord 的三個問題（1.2／1.3 就有）：帳號名稱裡連續五個反引號可以讓程式碼框提早結束、
+  假的煞車連結會被放到框外、太長的假煞車行會讓程式一直跑到記憶體用完。用 Discord 的請升級。
+- Self-test: 311 checks. The fake server checks Telegram's HTML, button addresses and Discord's card
+  limits the way the services do, and plays a blocked bot, a group that moved, a forum channel and a
+  deleted webhook.
+
+Upgrading from 1.3.x: replace `lib/SecurityAlerts.php` and the cron entry (`--telegram-chats`, the new
+`--status` and `--test-all` lines). Without touching the config, three things change: notices and the
+check-in stop ringing (`'ring_level' => 0` for the old behaviour); Telegram and Discord get the new
+layout (`'rich_messages' => false` for the old one); and with more than one place to send to, the
+weekly check-in checks each channel (a few GET requests, and a moment of "typing…" on Telegram).
+從 1.3.x 升級：換掉 lib 和排程檔。不改設定時會變的三件事：一般通知不再響（要全部響設 `ring_level => 0`）、
+Telegram／Discord 用新排版（要純文字設 `rich_messages => false`）、每週報平安會順便檢查各管道。
+
 ## 1.3.0 — 2026-11-23
 
 - **Page watch** (`page_watch`, optional): a few of your own pages are read every hour four ways — a

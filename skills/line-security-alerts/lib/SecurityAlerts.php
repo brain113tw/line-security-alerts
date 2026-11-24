@@ -48,11 +48,16 @@ final class SecurityAlerts
     const NOTICE = 1;   // worth a message
     const URGENT = 2;   // send even if the daily cap is reached
     const BRAKE_MARK = "\u{1F6D1} ";   // starts the emergency-brake line at the end of an URGENT message
+    const VERSION = '1.4.0';
 
     /** @var array */
     private $cfg;
     /** @var resource|null */
     private $lockHandle = null;
+    /** @var array  Telegram groups seen moving to a supergroup during this run: old id => new id (never stored) */
+    private $tgMoved = array();
+    /** @var array|null  LINE's allowance as asked during this run: array('at' => clock, 'q' => answer) */
+    private $quotaMemo = null;
     /** @var array|null  built-in rules minus `disable_rules` plus `extra_rules` */
     private $rules = null;
     /** @var array  id => words for the message, for extra rules that bring their own */
@@ -98,15 +103,32 @@ final class SecurityAlerts
             'line_friends_warn'  => 20,
 
             /* Telegram (optional): a bot token from @BotFather and the chat to write to (a number, negative for a
-               group; one id or an array). Sent as plain text without link previews. The token gives full control
-               of the bot: keep it out of version control. */
+               group; one id or an array). To write into one topic of a group with topics, add "/" and the topic
+               number: '-1001234567890/12' (`--telegram-chats` prints these for you). No link previews. The token
+               gives full control of the bot: keep it out of version control. */
             'telegram_bot_token' => '',
             'telegram_chat_id'   => '',
             'telegram_api_base'  => 'https://api.telegram.org',   // point to a fake server in tests
 
             /* Discord (optional): a channel webhook address (one or an array). The address IS the key: whoever has
-               it can post to that channel. Mentions such as @everyone in a message never ping anybody. */
+               it can post to that channel. Mentions such as @everyone in a message never ping anybody. To post into
+               one thread of the channel, or one post of a forum channel (a forum needs it), add
+               ?thread_id=<its id> to the address. */
             'discord_webhook_url' => '',
+
+            /* How messages sound and look (1.4.0).
+               ring_level: messages at or above this level ring; the others arrive quietly, in the chat all the same
+               (LINE: no notification; Telegram: a notification without sound; Discord: no notification, only the
+               unread mark). 2 = only URGENT alerts ring (default); 1 = notices too; 0 = everything, the weekly
+               check-in included. URGENT alerts and test messages always ring. E-mail is not affected; a notifier
+               gets it as its third argument. */
+            'ring_level'         => 2,
+            /* Telegram: bold titles, the advice folded away, buttons; Discord: one coloured card per finding.
+               false = plain text everywhere, as before 1.4. Whatever the rich form trips over, the plain one is sent. */
+            'rich_messages'      => true,
+            /* The "what to do" button / link in alerts on Telegram and Discord: 'auto' = this package's guide in your
+               language (on GitHub), '' = none, or the address of your own copy. */
+            'guide_url'          => 'auto',
 
             /* E-mail fallback (PHP mail()) */
             'mail_to'            => '',
@@ -208,7 +230,7 @@ final class SecurityAlerts
             'brake_link_hours'   => 24,
             'brake_allow_ips'    => array(),       // IPs never locked out (e.g. your developer's office), exact match
 
-            /* Your own channel (Slack, ntfy, SMS…): function(string $text, int $level): bool.
+            /* Your own channel (Slack, ntfy, SMS…): function(string $text, int $level, bool $silent = false): bool.
                Tried first; when it returns false (or is not set) the message goes on to Telegram, Discord, LINE,
                then e-mail. */
             'notifier'           => null,
@@ -338,6 +360,7 @@ final class SecurityAlerts
         try
         {
             $now = $this->now();
+            $this->quotaMemo = null;
             $state = $this->loadState();
             $since = isset($state['last_run']) ? (int) $state['last_run'] : 0;
             /* "fresh" = recorded since the previous run (first run: the last hour; after a long pause: at most 2 days).
@@ -388,30 +411,257 @@ final class SecurityAlerts
      */
     public function sendTest()
     {
-        return $this->deliver($this->testText());
+        return $this->deliver($this->testMsg(), self::NOTICE, true);
     }
 
     /**
      * Sends the test message to EVERY channel that is set up, each on its own, so a setup mistake on one of
-     * them is not hidden by the next one taking over. Read-only otherwise.
+     * them is not hidden by the next one taking over. Read-only otherwise. Test messages always ring.
      *
-     * @return array channel => array('ok' => bool, 'why' => short reason when it failed, e.g. "HTTP 401: Unauthorized")
+     * @return array channel => array('ok' => bool, 'why' => short reason when it failed, e.g. "HTTP 401: Unauthorized",
+     *               'hint' => what to do about it, in plain words)
      */
     public function testEachChannel()
     {
-        $text = $this->testText();
+        $msg = $this->testMsg();
         $out = array();
         foreach (array_keys($this->channels()) as $ch)
         {
-            $r = $this->sendVia($ch, $text);
-            $out[$ch] = array('ok' => $r[0], 'why' => $r[0] ? '' : $r[1]);
+            $r = $this->sendVia($ch, $msg, self::NOTICE, true);
+            $out[$ch] = array('ok' => $r[0], 'why' => $r[0] ? '' : $r[1], 'hint' => $r[0] ? '' : $this->failHint($r[2]));
         }
         return $out;
     }
 
-    private function testText()
+    private function testMsg()
     {
-        return $this->t('header', $this->cfg['site_name'], date('m/d H:i', $this->now())) . "\n\n" . $this->t('test_body');
+        $head = $this->t('header', $this->cfg['site_name'], date('m/d H:i', $this->now()));
+        return array('kind' => 'test', 'head' => $head, 'items' => array($this->item(-1, '', array($this->t('test_body')))),
+            'note' => '', 'brake' => '', 'warn' => false, 'plain' => $head . "\n\n" . $this->t('test_body'));
+    }
+
+    /**
+     * Every channel that is set up, checked WITHOUT sending a message: Telegram shows "typing…" for a moment in
+     * the chat, Discord is asked about its webhook, LINE about its key and each recipient (a LINE push to someone
+     * who blocked the account is accepted and silently dropped, so this is the only way to see it). E-mail and a
+     * notifier of your own cannot be checked without sending ('ok' => null). The weekly check-in runs this when
+     * there is a backup channel, because a backup is only used when the main one fails — the worst moment to find
+     * out it stopped working. The answer is kept for status().
+     *
+     * @return array channel => array('ok' => true | false | null, 'code' => short word (see failHint()), 'why' => details)
+     */
+    public function checkChannels()
+    {
+        $this->quotaMemo = null;   // asked afresh, whatever an earlier call in this run heard
+        return $this->checkAll();
+    }
+
+    /** checkChannels() without forgetting LINE's allowance as already asked during this run (the weekly check-in) */
+    private function checkAll()
+    {
+        $out = array();
+        foreach (array_keys($this->channels()) as $ch)
+        {
+            try
+            {
+                $out[$ch] = $this->checkChannel($ch);
+            }
+            catch (Throwable $e)
+            {
+                $out[$ch] = array('ok' => false, 'code' => 'other', 'why' => 'an error while checking');
+            }
+        }
+        @file_put_contents($this->path('channels.json'), (string) $this->json(array('at' => $this->now(), 'channels' => $out)), LOCK_EX);
+        return $out;
+    }
+
+    private function checkChannel($ch)
+    {
+        $good = array('ok' => true, 'code' => '', 'why' => '');
+        if ($ch === 'telegram')
+        {
+            $token = trim((string) $this->cfg['telegram_bot_token']);
+            if (!preg_match('/^[0-9]+:[A-Za-z0-9_-]+$/', $token))
+            {
+                return array('ok' => false, 'code' => 'token', 'why' => 'the bot token is not in the "123456789:ABC..." form');
+            }
+            $base = rtrim((string) $this->cfg['telegram_api_base'], '/') . '/bot' . $token . '/';
+            $this->tgMoved = array();
+            foreach ($this->listOf($this->cfg['telegram_chat_id']) as $spec)
+            {
+                list($chat, $topic) = $this->telegramTarget($spec);
+                /* getChat: can the bot see the chat at all, and what is it. A channel cannot show "typing…": there
+                   the bot (one of its admins) must still be allowed to post. Elsewhere "typing…" is what shows a
+                   person who blocked the bot, or a topic that was deleted. */
+                $r = $this->telegramCall($base, 'getChat', $chat, 0, array(), false);
+                if ($r[0] && isset($r[5]['result']['type']) && $r[5]['result']['type'] === 'channel')
+                {
+                    $bot = (string) strstr($token, ':', true);
+                    $m = $this->telegramCall($base, 'getChatMember', $r[4], 0, array('user_id' => PHP_INT_SIZE >= 8 ? (int) $bot : $bot), false);
+                    if (!$m[0])
+                    {
+                        return array('ok' => false, 'code' => $m[3], 'why' => $m[1]);
+                    }
+                    $st = isset($m[5]['result']['status']) && is_scalar($m[5]['result']['status']) ? (string) $m[5]['result']['status'] : '';
+                    if (!($st === 'creator' || ($st === 'administrator' && !empty($m[5]['result']['can_post_messages']))))
+                    {
+                        return array('ok' => false, 'code' => 'kicked', 'why' => 'the bot may not post in this channel (it is "' . $this->cut($this->clean($st), 20) . '" there, without "Post messages")');
+                    }
+                }
+                elseif ($r[0])
+                {
+                    $r = $this->telegramCall($base, 'sendChatAction', $r[4], $topic, array('action' => 'typing'), false);
+                }
+                if (!$r[0])
+                {
+                    return array('ok' => false, 'code' => $r[3], 'why' => $r[1]);
+                }
+            }
+            /* a group that became a supergroup: still reached (each message follows Telegram's answer), but say so */
+            return $this->tgMoved ? array('ok' => true, 'code' => '', 'why' => '', 'moved' => count($this->tgMoved)) : $good;
+        }
+        if ($ch === 'discord')
+        {
+            foreach ($this->listOf($this->cfg['discord_webhook_url']) as $url)
+            {
+                if (!preg_match('#^https?://\S+$#i', $url))
+                {
+                    return array('ok' => false, 'code' => 'webhook_bad', 'why' => 'the webhook address does not start with https://');
+                }
+                $gone = $this->discordGone($url);
+                if ($gone !== null)
+                {
+                    return array('ok' => false, 'code' => $gone['code'], 'why' => $this->goneWhy($gone));   // Discord: do not ask again
+                }
+                /* the address without ?thread_id=…: Discord describes the webhook itself */
+                $r = (array) $this->http((string) preg_replace('/\?.*$/', '', $url), array($this->ua(true)), '', 'GET');
+                $status = isset($r[0]) ? (int) $r[0] : 0;
+                if ($status < 200 || $status >= 300)
+                {
+                    $resp = isset($r[1]) ? (string) $r[1] : '';
+                    $code = $this->failCode('discord', $status, json_decode($resp, true));
+                    if ($status === 404)
+                    {
+                        $this->discordGoneSet($url, $code === 'forum_thread' ? 'forum_thread' : 'webhook_gone');
+                    }
+                    return array('ok' => false, 'code' => $code, 'why' => $this->failReason($status, $resp));
+                }
+            }
+            return $good;
+        }
+        if ($ch === 'line')
+        {
+            $base = rtrim((string) $this->cfg['line_api_base'], '/');
+            $headers = array('Authorization: Bearer ' . (string) $this->cfg['line_channel_access_token']);
+            $paths = array('/v2/bot/info');
+            foreach ($this->listOf($this->cfg['line_to']) as $to)
+            {
+                if ($to[0] === 'U')
+                {
+                    $paths[] = '/v2/bot/profile/' . rawurlencode($to);   // 404 = blocked the account, or never added it
+                }
+                elseif ($to[0] === 'C')
+                {
+                    $paths[] = '/v2/bot/group/' . rawurlencode($to) . '/summary';   // 404 = the account is not in the group
+                }
+            }
+            foreach ($paths as $i => $p)
+            {
+                $r = (array) $this->http($base . $p, $headers, '', 'GET');
+                $status = isset($r[0]) ? (int) $r[0] : 0;
+                if ($status < 200 || $status >= 300)
+                {
+                    $resp = isset($r[1]) ? (string) $r[1] : '';
+                    $code = ($i > 0 && $status === 404) ? 'recipient_gone' : $this->failCode('line', $status, json_decode($resp, true));
+                    return array('ok' => false, 'code' => $code, 'why' => $this->failReason($status, $resp));
+                }
+            }
+            /* a backup whose monthly allowance is used up would answer every push with 429 */
+            $q = $this->lineQuota();
+            if ($q !== null && $q['used'] >= $q['limit'])
+            {
+                return array('ok' => false, 'code' => 'quota', 'why' => "this month's allowance is used up (about " . $q['used'] . ' of ' . $q['limit'] . ')');
+            }
+            return $good;
+        }
+        return array('ok' => null, 'code' => '', 'why' => '');
+    }
+
+    /**
+     * For setting up telegram_chat_id: the chats that recently wrote to the bot, read with getUpdates (Telegram
+     * keeps them for about a day; reading them here does not mark them as read). A person appears after pressing
+     * Start, a group after a command there such as /start@YourBot (bots only see commands in groups unless their
+     * privacy mode is off), a topic of a group after a command in that topic. Nothing is sent.
+     *
+     * @return array array('ok' => bool, 'why' => reason when not ok, 'chats' => list of
+     *               array('id' => what to put into telegram_chat_id, 'type' => private | group | supergroup | channel | topic, 'name' => …),
+     *               'moved' => old id => new id, for ids in telegram_chat_id that Telegram says became a supergroup)
+     */
+    public function telegramChats()
+    {
+        $token = trim((string) $this->cfg['telegram_bot_token']);
+        if (!preg_match('/^[0-9]+:[A-Za-z0-9_-]+$/', $token))
+        {
+            return array('ok' => false, 'why' => 'telegram_bot_token is missing or not in the "123456789:ABC..." form that @BotFather gives', 'chats' => array(), 'moved' => array());
+        }
+        $base = rtrim((string) $this->cfg['telegram_api_base'], '/') . '/bot' . $token . '/';
+        /* the configured groups that moved: asked of Telegram itself, never taken from a file */
+        $moved = array();
+        foreach ($this->listOf($this->cfg['telegram_chat_id']) as $spec)
+        {
+            list($chat) = $this->telegramTarget($spec);
+            if (!isset($moved[$chat]))
+            {
+                $g = $this->post($base . 'getChat', (string) $this->json(array('chat_id' => $chat)));
+                $new = $g[0] ? '' : $this->migratedTo($g[3]);
+                if ($new !== '')
+                {
+                    $moved[$chat] = $new;
+                }
+            }
+        }
+        $r = (array) $this->http($base . 'getUpdates', array('Content-Type: application/json'), (string) json_encode(array('limit' => 100, 'timeout' => 0)));
+        $status = isset($r[0]) ? (int) $r[0] : 0;
+        $resp = isset($r[1]) ? (string) $r[1] : '';
+        $j = json_decode($resp, true, 64, JSON_BIGINT_AS_STRING);
+        if ($status < 200 || $status >= 300 || !is_array($j) || empty($j['ok']))
+        {
+            $why = $status === 409
+                ? 'this bot has a webhook set, so its messages cannot be read here: remove the webhook (deleteWebhook) or ask whoever set it up'
+                : $this->failReason($status, $resp) . ' - ' . $this->failHint($this->failCode('telegram', $status, $j));
+            return array('ok' => false, 'why' => $why, 'chats' => array(), 'moved' => $moved);
+        }
+        $chats = array();
+        $s = function ($v) { return is_scalar($v) ? (string) $v : ''; };
+        foreach (isset($j['result']) && is_array($j['result']) ? $j['result'] : array() as $u)
+        {
+            foreach (array('message', 'edited_message', 'channel_post', 'my_chat_member') as $k)
+            {
+                if (!is_array($u) || !isset($u[$k]['chat']['id']) || !is_scalar($u[$k]['chat']['id']) || !is_array($u[$k]['chat']))
+                {
+                    continue;
+                }
+                $m = $u[$k];
+                $c = $m['chat'];
+                $id = (string) $c['id'];
+                $name = isset($c['title']) ? $s($c['title'])
+                    : trim((isset($c['first_name']) ? $s($c['first_name']) : '') . ' ' . (isset($c['last_name']) ? $s($c['last_name']) : ''));
+                if ($name === '' && isset($c['username']) && $s($c['username']) !== '')
+                {
+                    $name = '@' . $s($c['username']);
+                }
+                $chats[$id] = array('id' => $id, 'type' => isset($c['type']) ? $this->clean($s($c['type'])) : '', 'name' => $this->clean($name));
+                if (!empty($m['is_topic_message']) && isset($m['message_thread_id']) && is_numeric($m['message_thread_id']))
+                {
+                    $topic = (int) $m['message_thread_id'];
+                    $tname = isset($m['reply_to_message']['forum_topic_created']['name']) ? $s($m['reply_to_message']['forum_topic_created']['name'])
+                        : (isset($m['forum_topic_created']['name']) ? $s($m['forum_topic_created']['name']) : '');
+                    $chats[$id . '/' . $topic] = array('id' => $id . '/' . $topic, 'type' => 'topic', 'name' => $this->clean($name . ($tname !== '' ? ' › ' . $tname : '')));
+                }
+                break;
+            }
+        }
+        return array('ok' => true, 'why' => '', 'chats' => array_values($chats), 'moved' => $moved);
     }
 
     /** Forget all file fingerprints; the next scan records a fresh baseline silently. */
@@ -707,7 +957,7 @@ final class SecurityAlerts
             {
                 $out[] = $this->finding('brake', 'brake:lock:' . $e['t'], self::URGENT, $this->t('brake_locked_title'),
                     array($this->t($d['by'] === 'link' ? 'brake_locked_link' : 'brake_locked_cmd', date('m/d H:i', $e['t']), date('m/d H:i', (int) $d['until']),
-                        $d['ip'] !== '' ? $d['ip'] : '?'), $this->t('brake_locked_hint')), 1);
+                        $d['ip'] !== '' ? $d['ip'] : '?'), $this->hint('brake_locked_hint')), 1);
             }
             else
             {
@@ -951,6 +1201,13 @@ final class SecurityAlerts
             'expect'       => null,
             /* the last answer from lineFriendCount(): array('n' => about how many friends, 'at' => when asked) */
             'line_friends' => null,
+            /* the last checkChannels(): array('at' => when, 'channels' => channel => array('ok', 'code', 'why')) */
+            'channels'     => null,
+            /* how many ids in telegram_chat_id were groups that became supergroups, at the last channel check (each
+               message follows Telegram's answer to the new id; telegramChats() asks Telegram and names both) */
+            'telegram_moved' => 0,
+            /* Discord webhooks (of discord_webhook_url) that Discord said do not exist: when it said so, oldest first */
+            'discord_gone' => array(),
             'recent'       => array(),
             'problems'     => array(),
         );
@@ -996,6 +1253,52 @@ final class SecurityAlerts
         {
             $first = $this->route(self::URGENT);
             $p[] = 'line_min_level is ' . $min . ', but LINE is not set up: urgent alerts go to ' . $names[$first[0]] . ' like everything else';
+        }
+        $cf = $dir . '/channels.json';
+        $cj = is_file($cf) ? json_decode((string) @file_get_contents($cf), true) : null;
+        if (is_array($cj) && isset($cj['channels']) && is_array($cj['channels']))
+        {
+            $at = isset($cj['at']) && is_numeric($cj['at']) ? (int) $cj['at'] : 0;
+            $out['channels'] = array('at' => $at, 'channels' => $cj['channels']);
+            foreach ($cj['channels'] as $ch => $h)
+            {
+                if (!isset($on[$ch], $names[$ch]) || !is_array($h))
+                {
+                    continue;
+                }
+                if (isset($h['ok']) && $h['ok'] === false)
+                {
+                    $hint = $this->failHint(isset($h['code']) && is_scalar($h['code']) ? (string) $h['code'] : '');
+                    $p[] = $names[$ch] . ' does not work (checked ' . date('m/d H:i', $at) . '): '
+                        . ($hint !== '' ? $hint : (isset($h['why']) && is_scalar($h['why']) ? (string) $h['why'] : 'it refused'));
+                }
+                if ($ch === 'telegram' && isset($h['moved']) && is_numeric($h['moved']) && (int) $h['moved'] > 0)
+                {
+                    $out['telegram_moved'] = (int) $h['moved'];
+                    /* no ids here (status never shows one): --telegram-chats asks Telegram and prints the old and the new id */
+                    $p[] = 'a Telegram group in telegram_chat_id became a supergroup and has a new id (seen ' . date('m/d H:i', $at)
+                        . '); alerts still reach it. Run --telegram-chats to see the new id and put it into telegram_chat_id';
+                }
+            }
+        }
+        $gone = array('webhook_gone' => array(), 'forum_thread' => array());
+        foreach ($this->listOf($this->cfg['discord_webhook_url']) as $url)
+        {
+            $g = $this->discordGone($url);
+            if ($g !== null)
+            {
+                $out['discord_gone'][] = $g['at'];
+                $gone[$g['code']][] = $g['at'];
+            }
+        }
+        sort($out['discord_gone']);
+        if ($gone['webhook_gone'])
+        {
+            $p[] = 'Discord said on ' . date('m/d H:i', min($gone['webhook_gone'])) . ' that a webhook in discord_webhook_url does not exist: create a new one and put its address in (Discord asks that the old one is not tried again, so it is not)';
+        }
+        if ($gone['forum_thread'])
+        {
+            $p[] = 'Discord said on ' . date('m/d H:i', min($gone['forum_thread'])) . ' that the thread named by ?thread_id= in discord_webhook_url does not exist: put the right thread id in (the address is not tried again until it changes)';
         }
         if ($out['waiting']['count'] > 0) { $p[] = $out['waiting']['count'] . ' alert(s) could not be delivered yet and are waiting to be re-sent'; }
         if ($out['outside_checkin']['failing'] >= 3) { $p[] = 'the outside check-in address has failed ' . $out['outside_checkin']['failing'] . ' times in a row'; }
@@ -1144,7 +1447,7 @@ final class SecurityAlerts
                 if ($isNew)
                 {
                     $out[] = $this->finding('login', 'newdev:' . $u . ':' . $net . ':' . $ua, self::NOTICE, $this->t('new_device_title', $e['d']['user']),
-                        array($this->t('new_device_body', $this->uaLabel($e['d']['ua']), $e['d']['ip'], date('m/d H:i', $e['t'])), $this->t('new_device_hint')));
+                        array($this->t('new_device_body', $this->uaLabel($e['d']['ua']), $e['d']['ip'], date('m/d H:i', $e['t'])), $this->hint('new_device_hint')));
                 }
             }
             $state['devices'] = $devices;
@@ -1634,7 +1937,7 @@ final class SecurityAlerts
             /* We had fingerprints and now they are gone, and nobody asked for a reset: the classic way to
                blind a file monitor. We cannot say what changed, so say that — loudly — and start over. */
             $notes[] = $this->finding('files', 'files:lost:' . date('Ymd', $now), self::URGENT, $this->t('file_lost_title'),
-                array($this->t('file_lost_body'), $this->t('file_lost_hint')), 24);
+                array($this->t('file_lost_body'), $this->hint('file_lost_hint')), 24);
             $baselined = false;
             $upgraded = 0;
             $deep = false;
@@ -1753,7 +2056,7 @@ final class SecurityAlerts
                 /* Said once, when the whole conversion is done, so the owner knows why the fingerprints look
                    different — and so that a "conversion" nobody asked for does not pass unnoticed. */
                 $notes[] = $this->finding('files', 'files:sha256:' . $now, self::NOTICE, $this->t('file_algo_title'),
-                    array($this->t('file_algo_body', $upgraded), $this->t('file_algo_hint')), 1);
+                    array($this->t('file_algo_body', $upgraded), $this->hint('file_algo_hint')), 1);
             }
             if ($deep || !$baselined)
             {
@@ -1927,7 +2230,7 @@ final class SecurityAlerts
         }
         /* 1 window + 1 counts + at most 5 files + 1 hint = the 8 lines that are sent */
         return $this->finding('files', 'files:exp:' . (int) $exp['from'] . ':' . $gen, self::NOTICE, $this->t('exp_title'),
-            array_merge($lines, $list, array($this->t('exp_hint'))), 168);
+            array_merge($lines, $list, array($this->hint('exp_hint'))), 168);
     }
 
     /** A program (not a server config file) inside an upload folder: the only thing quarantine_uploads acts on. */
@@ -1991,7 +2294,7 @@ final class SecurityAlerts
                 if (isset($moved[$rel]) && is_string($moved[$rel]))
                 {
                     $urgentLines[] = $this->t('file_new_quarantined', $this->clean($rel), $why, $this->clean($moved[$rel]));
-                    $tail['ok'] = $this->t('file_quarantine_hint');
+                    $tail['ok'] = $this->hint('file_quarantine_hint');
                 }
                 elseif (isset($moved[$rel]))
                 {
@@ -2022,7 +2325,7 @@ final class SecurityAlerts
                 $shown[] = $this->t('file_more', count($urgentLines) - ($room - 1));
             }
             $out[] = $this->finding('files', 'files:bad:' . $gen . ':' . md5(implode('|', $urgentLines)), self::URGENT, $this->t('file_bad_title'),
-                array_merge($shown, array_values($tail), array($this->t('file_bad_hint'))), 168);
+                array_merge($shown, array_values($tail), array($this->hint('file_bad_hint'))), 168);
         }
 
         $plainNew = array_keys(array_filter($new, function ($sus, $rel) use ($up) { return !$sus && !$this->inDirList($rel, $up); }, ARRAY_FILTER_USE_BOTH));
@@ -2038,7 +2341,7 @@ final class SecurityAlerts
             {
                 $lines[] = $l;
             }
-            $lines[] = $this->t('file_plain_hint');
+            $lines[] = $this->hint('file_plain_hint');
             $out[] = $this->finding('files', 'files:chg:' . $gen . ':' . md5(implode('|', array_merge($plainNew, array('/'), $plainChanged, array('/'), $deleted))),
                 self::NOTICE, $this->t('file_title'), $lines, 168);
         }
@@ -2144,7 +2447,7 @@ final class SecurityAlerts
                 $lines = array_slice($lines, 0, 6);
                 $lines[] = $this->t('page_more', count($found[$type]) - 6);
             }
-            $lines[] = $this->t($def[2]);
+            $lines[] = $this->hint($def[2]);
             $res['findings'][] = $this->finding('pages', 'pages:' . $type . ':' . md5(implode('|', $found[$type])), $def[0], $this->t($def[1]), $lines, 168);
         }
         return $res;
@@ -2825,12 +3128,12 @@ final class SecurityAlerts
             else
             {
                 usort($send, function ($a, $b) use ($findings) { return $findings[$b]['level'] - $findings[$a]['level']; });
-                $text = $this->compose(array_map(function ($i) use ($findings) { return $findings[$i]; }, $send), $now);
+                $msg = $this->composeMsg(array_map(function ($i) use ($findings) { return $findings[$i]; }, $send), $now);
                 if ($urgent)
                 {
-                    $text = $this->withBrake($text);
+                    $msg = $this->withBrake($msg);
                 }
-                $r = $this->deliver($text, $urgent ? self::URGENT : self::NOTICE);
+                $r = $this->deliver($msg, $urgent ? self::URGENT : self::NOTICE);
                 foreach ($send as $i)
                 {
                     $status[$i] = $r;
@@ -2846,7 +3149,7 @@ final class SecurityAlerts
                     /* Nothing could take the message (LINE down or refusing, and no e-mail). Keep it and try again
                        on the following runs: a one-time finding — a changed file, a new admin account — is seen
                        only once, so without this it would end up in the log and nowhere else. */
-                    $item = array('t' => $now, 'text' => $text, 'urgent' => $urgent ? 1 : 0, 'n' => count($send), 'u' => 0, 'files' => 0);
+                    $item = array('t' => $now, 'text' => $msg['plain'], 'msg' => $msg, 'urgent' => $urgent ? 1 : 0, 'n' => count($send), 'u' => 0, 'files' => 0);
                     foreach ($send as $i)
                     {
                         if ($findings[$i]['level'] >= self::URGENT) { $item['u']++; }
@@ -2882,7 +3185,7 @@ final class SecurityAlerts
                 $hb[$this->isChat($status[$i]) || $status[$i] === 'mail' ? 'files_sent' : 'files_quiet']++;
             }
             $this->append('findings.ndjson', array('t' => $now, 'level' => $f['level'], 'kind' => $f['kind'], 'key' => $f['key'],
-                'title' => $f['title'], 'lines' => $f['lines'], 'status' => $status[$i]));
+                'title' => $f['title'], 'lines' => $this->flat($f['lines']), 'status' => $status[$i]));
         }
         $state['hb'] = $hb;
         return $result;
@@ -2923,7 +3226,10 @@ final class SecurityAlerts
                 $keep[] = $item;
                 continue;
             }
-            $late = $this->cut($this->t('late_note', $when) . "\n\n" . (string) $item['text'], 4700);
+            /* kept by 1.4+ with its layout; an older record has the text only */
+            $late = isset($item['msg']) && is_array($item['msg']) && isset($item['msg']['plain']) ? $item['msg'] : $this->plainMsg((string) $item['text']);
+            $late['note'] = $this->t('late_note', $when);
+            $late['plain'] = $this->cut($late['note'] . "\n\n" . (string) $late['plain'], 4700);
             if (!empty($item['urgent']))
             {
                 $late = $this->withBrake($late);   // the link in the kept text may have expired by now: a fresh one
@@ -2991,7 +3297,7 @@ final class SecurityAlerts
         {
             $since = trim((string) @file_get_contents($witness));
             $out[] = $this->finding('system', 'state:lost:' . date('Ymd', $now), self::URGENT, $this->t('state_lost_title'),
-                array($this->t('state_lost_body', preg_match('/^[0-9]+$/', $since) ? date('Y-m-d', (int) $since) : '?'), $this->t('file_lost_hint')), 24);
+                array($this->t('state_lost_body', preg_match('/^[0-9]+$/', $since) ? date('Y-m-d', (int) $since) : '?'), $this->hint('file_lost_hint')), 24);
         }
         if ($fresh)
         {
@@ -3118,10 +3424,54 @@ final class SecurityAlerts
             $body[] = $this->t('hb_friends', $friends);
             $warn = true;
         }
-        $body[] = $this->t('hb_since', date('Y-m-d', (int) $state['installed_at']));
-        $body[] = $this->t('hb_hint');
-        $lines = array_merge(array($this->t($warn ? 'hb_header_warn' : 'hb_header', $this->cfg['site_name'], date('m/d H:i', $now)), ''), $body);
-        $r = $this->deliver(implode("\n", $lines), $warn ? self::NOTICE : self::LOG);
+        /* Every channel checked without sending anything (1.4.0) — when there is more than one place a message can go:
+           a backup is used only when the main channel fails, which is the worst moment to find out that it stopped
+           working weeks ago; and a LINE recipient who blocked the account still gets "sent" from LINE. With a
+           single place, this check-in arriving is the check. */
+        if ($this->destinations() > 1)
+        {
+            $good = array();
+            $bad = array();
+            $on = $this->channels();
+            $codes = array('blocked', 'kicked', 'chat_not_found', 'topic_gone', 'token', 'webhook_gone', 'webhook_bad', 'forum_thread',
+                'recipient_gone', 'quota', 'rate', 'server', 'network');
+            /* A check-in that could not be delivered is tried again on every run: the channels are asked at most
+               once in 20 hours (a check by --status counts), not on each of those tries. */
+            $cj = json_decode((string) @file_get_contents($this->cfg['state_dir'] . '/channels.json'), true);
+            $fresh = is_array($cj) && isset($cj['at'], $cj['channels']) && is_numeric($cj['at']) && is_array($cj['channels'])
+                && $now >= (int) $cj['at'] && $now - (int) $cj['at'] < 20 * 3600;
+            foreach ($fresh ? $cj['channels'] : $this->checkAll() as $ch => $h)
+            {
+                if (!isset($on[$ch]) || !is_array($h) || !array_key_exists('ok', $h))
+                {
+                    continue;
+                }
+                if ($h['ok'] === true)
+                {
+                    $good[] = $this->t('ch_name_' . $ch);
+                }
+                elseif ($h['ok'] === false)
+                {
+                    $code = isset($h['code']) && in_array($h['code'], $codes, true) ? $h['code'] : 'other';
+                    $bad[] = $this->t('ch_with_reason', $this->t('ch_name_' . $ch), $this->t('chw_' . $code));
+                }
+            }
+            if ($bad)
+            {
+                $body[] = $this->t('hb_channels_bad', implode($this->t('list_sep'), $bad));
+                $warn = true;
+            }
+            elseif ($good)
+            {
+                $body[] = $this->t('hb_channels_ok', implode($this->t('name_sep'), $good));
+            }
+        }
+        $body[] = $this->hint('hb_since', date('Y-m-d', (int) $state['installed_at']));
+        $body[] = $this->hint('hb_hint');
+        $head = $this->t($warn ? 'hb_header_warn' : 'hb_header', $this->cfg['site_name'], date('m/d H:i', $now));
+        $lines = array_merge(array($head, ''), $this->flat($body));
+        $r = $this->deliver(array('kind' => 'checkin', 'head' => $head, 'note' => '', 'brake' => '', 'warn' => $warn,
+            'items' => array($this->item(-1, '', $body)), 'plain' => implode("\n", $lines)), $warn ? self::NOTICE : self::LOG);
         $today = date('Y-m-d', $now);
         if ($r !== 'failed')
         {
@@ -3145,6 +3495,7 @@ final class SecurityAlerts
         return $r;
     }
 
+    /** The plain text of an alert: what LINE, e-mail and a notifier get, and what every channel falls back to. */
     private function compose(array $list, $now)
     {
         $lines = array($this->t('header', $this->cfg['site_name'], date('m/d H:i', $now)));
@@ -3152,7 +3503,7 @@ final class SecurityAlerts
         {
             $lines[] = '';
             $lines[] = '【' . $this->t('level_' . $f['level']) . '】' . $f['title'];
-            foreach (array_slice($f['lines'], 0, 8) as $l) { $lines[] = $l; }
+            foreach ($this->flat(array_slice($f['lines'], 0, 8)) as $l) { $lines[] = $l; }
         }
         $text = implode("\n", $lines);
         $cut = $this->cut($text, 4480);   // LINE's text limit is 5000 characters
@@ -3163,12 +3514,111 @@ final class SecurityAlerts
         return $text;
     }
 
-    /** The last line of an URGENT message: the emergency-brake link (replacing an older one), when the brake is set up. */
-    private function withBrake($text)
+    /**
+     * A message as handed to deliver(). 'plain' is the text above, exactly; the rest lets Telegram and Discord lay
+     * it out (bold titles, the advice set apart, buttons, coloured cards).
+     *   kind  'alert' | 'checkin' | 'test' | 'plain'        head  the first line (site, time)
+     *   items list of array('level' => -1..2, 'title', 'lines' => list, 'hints' => list)   (null = plain only)
+     *   note  '' or the "Delayed" note       brake  '' or the emergency-brake address       warn  check-in with a ⚠
+     */
+    private function composeMsg(array $list, $now)
     {
-        $text = (string) preg_replace('/\n\n' . self::BRAKE_MARK . '[^\n]*$/u', '', (string) $text);
+        $items = array();
+        foreach ($list as $f)
+        {
+            $items[] = $this->item((int) $f['level'], (string) $f['title'], array_slice($f['lines'], 0, 8));
+        }
+        return array('kind' => 'alert', 'head' => $this->t('header', $this->cfg['site_name'], date('m/d H:i', $now)), 'items' => $items,
+            'note' => '', 'brake' => '', 'warn' => false, 'plain' => $this->compose($list, $now));
+    }
+
+    /** A message that is text only (an older outbox record, a caller's own text). */
+    private function plainMsg($text)
+    {
+        return array('kind' => 'plain', 'head' => '', 'items' => null, 'note' => '', 'brake' => '', 'warn' => false, 'plain' => (string) $text);
+    }
+
+    /** One finding (or the check-in body) for the rich layouts: the advice lines apart from the others. */
+    private function item($level, $title, array $lines)
+    {
+        $plain = array();
+        $hints = array();
+        foreach ($lines as $l)
+        {
+            if (is_array($l))
+            {
+                $hints[] = isset($l['hint']) && is_scalar($l['hint']) ? (string) $l['hint'] : '';
+            }
+            else
+            {
+                $plain[] = (string) $l;
+            }
+        }
+        return array('level' => (int) $level, 'title' => (string) $title, 'lines' => $plain, 'hints' => array_values(array_filter($hints, 'strlen')));
+    }
+
+    /**
+     * A line of advice ("what to do"). In plain text it is a line like any other; Telegram folds it away under
+     * the facts, Discord puts it in a box of its own. Same arguments as t().
+     */
+    private function hint($key)
+    {
+        return array('hint' => call_user_func_array(array($this, 't'), func_get_args()));
+    }
+
+    /** Finding lines as plain strings (advice included, in place). */
+    private function flat(array $lines)
+    {
+        $out = array();
+        foreach ($lines as $l)
+        {
+            $out[] = is_array($l) ? (isset($l['hint']) && is_scalar($l['hint']) ? (string) $l['hint'] : '') : (string) $l;
+        }
+        return $out;
+    }
+
+    /**
+     * The last line of an URGENT message: the emergency-brake link (replacing an older one), when the brake is set
+     * up. The same link goes into 'brake', for the button on Telegram.
+     */
+    private function withBrake(array $msg)
+    {
+        $plain = $this->withoutBrake($msg);
         $link = $this->brakeLink();
-        return $link === '' ? $text : $text . "\n\n" . $this->t('brake_line', (int) $this->cfg['brake_hours'], $link);
+        $msg['brake'] = $link;
+        $msg['plain'] = $link === '' ? $plain : $plain . "\n\n" . $this->t('brake_line', (int) $this->cfg['brake_hours'], $link);
+        return $msg;
+    }
+
+    /**
+     * The plain text without the brake line that withBrake() put at its end — that line only: a finding line that
+     * merely looks like it (a finding can say anything) stays where it is. A message kept from 1.3 has no 'brake';
+     * its line is recognised by the signed token it ends with.
+     */
+    private function withoutBrake(array $msg)
+    {
+        $plain = (string) $msg['plain'];
+        $end = (string) $msg['brake'] !== '' ? preg_quote((string) $msg['brake'], '/') : '\S*[?&]t=[0-9]{9,11}\.[0-9a-f]{16}\.[0-9a-f]{32}';
+        $out = preg_replace('/\n\n' . self::BRAKE_MARK . '[^\n]*' . $end . '$/u', '', $plain);
+        return is_string($out) ? $out : $plain;
+    }
+
+    /** Does a message of this level arrive without ringing? (see ring_level; URGENT ones and tests always ring) */
+    private function silent($level, array $msg)
+    {
+        return $msg['kind'] !== 'test' && (int) $level < max(0, min(self::URGENT, (int) $this->cfg['ring_level']));
+    }
+
+    /** The "what to do" address for alerts on Telegram and Discord, or ''. */
+    private function guideUrl()
+    {
+        $g = is_scalar($this->cfg['guide_url']) ? trim((string) $this->cfg['guide_url']) : '';
+        if ($g === 'auto')
+        {
+            return 'https://github.com/brain113tw/line-security-alerts/blob/main/skills/line-security-alerts/reference/when-an-alert-arrives'
+                . ($this->cfg['language'] === 'zh-TW' ? '.zh-TW' : '') . '.md';
+        }
+        return preg_match('#^https?://[^\s<>"]+$#i', $g) ? $g : '';
     }
 
     /**
@@ -3231,13 +3681,19 @@ final class SecurityAlerts
     /**
      * Sends one message through the first channel that takes it (see route()).
      *
+     * @param  array|string $msg    a message from composeMsg() and friends, or plain text
+     * @param  bool         $manual sent because a person asked (a test): also tries a Discord webhook remembered as deleted
      * @return string the channel that took it: 'custom' | 'telegram' | 'discord' | 'line' | 'mail'; or 'failed'
      */
-    private function deliver($text, $level = self::NOTICE)
+    private function deliver($msg, $level = self::NOTICE, $manual = false)
     {
+        if (!is_array($msg))
+        {
+            $msg = $this->plainMsg((string) $msg);
+        }
         foreach ($this->route((int) $level) as $ch)
         {
-            $r = $this->sendVia($ch, $text, $level);
+            $r = $this->sendVia($ch, $msg, $level, $manual);
             if ($r[0])
             {
                 return $ch;
@@ -3256,6 +3712,18 @@ final class SecurityAlerts
         if ((string) $this->cfg['line_channel_access_token'] !== '' && $this->listOf($this->cfg['line_to'])) { $on['line'] = true; }
         if ((string) $this->cfg['mail_to'] !== '') { $on['mail'] = true; }
         return $on;
+    }
+
+    /** How many places a message can go: each Telegram chat, Discord webhook and LINE recipient, the notifier, e-mail. */
+    private function destinations()
+    {
+        $n = 0;
+        foreach (array_keys($this->channels()) as $ch)
+        {
+            $n += $ch === 'telegram' ? count($this->listOf($this->cfg['telegram_chat_id']))
+                : ($ch === 'discord' ? count($this->listOf($this->cfg['discord_webhook_url'])) : ($ch === 'line' ? count($this->listOf($this->cfg['line_to'])) : 1));
+        }
+        return $n;
     }
 
     /**
@@ -3313,54 +3781,67 @@ final class SecurityAlerts
         return $out;
     }
 
-    /** @return array array(bool $delivered, string $whyNot); the reason never contains a token or an address */
-    private function sendVia($ch, $text, $level = self::NOTICE)
+    /**
+     * @return array array(bool $delivered, string $whyNot, string $failCode); the reason never contains a token or
+     *               an address; the code is a short word for it (see failCode())
+     */
+    private function sendVia($ch, array $msg, $level = self::NOTICE, $manual = false)
     {
+        $silent = $this->silent($level, $msg);
         try
         {
             switch ($ch)
             {
                 case 'custom':
                     /* Your own channel. If it says no (or breaks), the next channel is tried. */
-                    return call_user_func($this->cfg['notifier'], $text, (int) $level) ? array(true, '') : array(false, 'the notifier returned false');
+                    return call_user_func($this->cfg['notifier'], $msg['plain'], (int) $level, $silent)
+                        ? array(true, '', '') : array(false, 'the notifier returned false', 'other');
                 case 'telegram':
-                    return $this->sendTelegram($text);
+                    return $this->sendTelegram($msg, $silent);
                 case 'discord':
-                    return $this->sendDiscord($text);
+                    return $this->sendDiscord($msg, $silent, $manual);
                 case 'line':
-                    return $this->sendLine($text);
+                    return $this->sendLine($msg['plain'], $silent);
                 case 'mail':
-                    return $this->sendMail($text);
+                    return $this->sendMail($msg['plain']);
             }
         }
         catch (Throwable $e)
         {
-            return array(false, 'an error inside the ' . $ch . ' channel');   // the exception text could quote an address: not shown
+            return array(false, 'an error inside the ' . $ch . ' channel', 'other');   // the exception text could quote an address: not shown
         }
-        return array(false, 'unknown channel');
+        return array(false, 'unknown channel', 'other');
     }
 
-    private function sendLine($text)
+    /** $silent: no push notification on the phone (the message is in the chat all the same) */
+    private function sendLine($text, $silent = false)
     {
         $ok = 0;
         $why = '';
+        $code = '';
         $url = rtrim((string) $this->cfg['line_api_base'], '/') . '/v2/bot/message/push';
         $headers = array('Content-Type: application/json', 'Authorization: Bearer ' . (string) $this->cfg['line_channel_access_token']);
         foreach ($this->listOf($this->cfg['line_to']) as $to)
         {
-            $body = $this->json(array('to' => $to, 'messages' => array(array('type' => 'text', 'text' => $text))), JSON_UNESCAPED_UNICODE);
-            $r = (array) $this->http($url, $headers, $body);
-            $code = isset($r[0]) ? (int) $r[0] : 0;
-            if ($code >= 200 && $code < 300)
+            $req = array('to' => $to, 'messages' => array(array('type' => 'text', 'text' => $text)));
+            if ($silent)
+            {
+                $req['notificationDisabled'] = true;
+            }
+            $r = (array) $this->http($url, $headers, (string) $this->json($req, JSON_UNESCAPED_UNICODE));
+            $status = isset($r[0]) ? (int) $r[0] : 0;
+            if ($status >= 200 && $status < 300)
             {
                 $ok++;
             }
             else
             {
-                $why = $this->failReason($code, isset($r[1]) ? (string) $r[1] : '');
+                $resp = isset($r[1]) ? (string) $r[1] : '';
+                $why = $this->failReason($status, $resp);
+                $code = $this->failCode('line', $status, json_decode($resp, true));
             }
         }
-        return array($ok > 0, $ok > 0 ? '' : $why);
+        return array($ok > 0, $ok > 0 ? '' : $why, $ok > 0 ? '' : $code);
     }
 
     private function sendMail($text)
@@ -3370,96 +3851,490 @@ final class SecurityAlerts
             ? (bool) call_user_func($this->cfg['mailer'], $this->cfg['mail_to'], $subject, $text, $this->cfg['mail_from'])
             : @mail($this->cfg['mail_to'], '=?UTF-8?B?' . base64_encode($subject) . '?=', $text,
                 'Content-Type: text/plain; charset=UTF-8' . ($this->cfg['mail_from'] !== '' ? "\r\nFrom: " . $this->cfg['mail_from'] : ''));
-        return array((bool) $sent, $sent ? '' : 'the mail function did not accept the message');
+        return array((bool) $sent, $sent ? '' : 'the mail function did not accept the message', $sent ? '' : 'other');
     }
 
     /**
-     * Telegram Bot API, sendMessage. Plain text: no parse_mode, so "_" or "*" in a file name stay as they are.
-     * No link preview. Telegram takes up to 4096 characters; a longer message is sent in parts.
-     * The token is part of the address, which is why the address is never written anywhere.
+     * Telegram Bot API, sendMessage, no link previews. With rich_messages: HTML (bold titles, the advice in a
+     * blockquote that opens on a tap) and buttons (the emergency brake, "what to do"). Telegram refusing any of
+     * that (a 400) means the same message is sent again as plain text, so a formatting slip never costs an alert.
+     * Plain text has no parse_mode: "_" or "*" in a file name stay as they are. Up to 4096 characters a message;
+     * a longer one goes in parts, as plain text. The token is part of the address: the address is never written anywhere.
      */
-    private function sendTelegram($text)
+    private function sendTelegram(array $msg, $silent = false)
     {
         $token = trim((string) $this->cfg['telegram_bot_token']);
         if (!preg_match('/^[0-9]+:[A-Za-z0-9_-]+$/', $token))
         {
-            return array(false, 'the bot token does not look like "123456789:ABC..." (the form @BotFather gives)');
+            return array(false, 'the bot token does not look like "123456789:ABC..." (the form @BotFather gives)', 'token');
         }
-        $url = rtrim((string) $this->cfg['telegram_api_base'], '/') . '/bot' . $token . '/sendMessage';
-        $parts = $this->split($text, 4000);
+        $base = rtrim((string) $this->cfg['telegram_api_base'], '/') . '/bot' . $token . '/';
+        $rich = $this->cfg['rich_messages'] && is_array($msg['items']) && $this->units($msg['plain']) <= 4000;
+        $html = $rich ? $this->telegramHtml($msg) : '';
+        $keys = $rich ? $this->telegramButtons($msg) : null;
+        $parts = null;
         $ok = 0;
         $why = '';
-        foreach ($this->listOf($this->cfg['telegram_chat_id']) as $chat)
+        $code = '';
+        foreach ($this->listOf($this->cfg['telegram_chat_id']) as $spec)
         {
-            $all = true;
-            foreach ($parts as $part)
+            list($chat, $topic) = $this->telegramTarget($spec);
+            $done = false;
+            if ($rich)
             {
-                $body = $this->json(array('chat_id' => $chat, 'text' => $part, 'link_preview_options' => array('is_disabled' => true)), JSON_UNESCAPED_UNICODE);
-                $r = $this->post($url, $body);
-                if (!$r[0])
+                $p = array('text' => $html, 'parse_mode' => 'HTML');
+                if ($keys !== null)
                 {
-                    $all = false;
-                    $why = $r[1];
-                    break;
+                    $p['reply_markup'] = $keys;
+                }
+                $r = $this->telegramCall($base, 'sendMessage', $chat, $topic, $p, $silent);
+                $chat = $r[4];   // a group that turned into a supergroup has a new id: the plain retry goes there too
+                if ($r[0])
+                {
+                    $done = true;
+                }
+                elseif ($r[2] !== 400)
+                {
+                    $why = $r[1];      // not a formatting problem: plain text would be refused just the same
+                    $code = $r[3];
+                    continue;
                 }
             }
-            if ($all)
+            if (!$done)
+            {
+                if ($parts === null)
+                {
+                    $parts = $this->split($msg['plain'], 4000);
+                }
+                $done = true;
+                foreach ($parts as $part)
+                {
+                    $r = $this->telegramCall($base, 'sendMessage', $chat, $topic, array('text' => $part), $silent);
+                    $chat = $r[4];
+                    if (!$r[0])
+                    {
+                        $done = false;
+                        $why = $r[1];
+                        $code = $r[3];
+                        break;
+                    }
+                }
+            }
+            if ($done)
             {
                 $ok++;
             }
         }
-        return array($ok > 0, $ok > 0 ? '' : $why);
+        return array($ok > 0, $ok > 0 ? '' : $why, $ok > 0 ? '' : $code);
     }
 
     /**
-     * Discord webhook. Discord reads markdown in every message, so a file name like __init__.php would come out
-     * underlined and an account name like [reset](https://…) as a disguised link. The text therefore goes inside
-     * a code block, where everything shows exactly as written and nothing is a link. allowed_mentions with an
-     * empty list: an "@everyone" in a file or account name never pings anybody. 2000 characters per message;
-     * a longer one is sent in parts. The address is the key, so it is never written anywhere.
+     * One Bot API call for one chat. When a group has been turned into a supergroup, Telegram refuses the old id and
+     * names the new one: the call is repeated there once. Nothing is stored: every message follows Telegram's own
+     * answer, so no file on the server can send alerts elsewhere. The move is counted in $tgMoved for the channel
+     * check (--status then asks you to update telegram_chat_id).
+     *
+     * @return array array(bool $ok, string $whyNot, int $httpStatus, string $failCode, string $chatIdUsed, mixed $decodedAnswer)
      */
-    private function sendDiscord($text)
+    private function telegramCall($base, $method, $chat, $topic, array $params, $silent)
     {
-        /* The emergency-brake link must be tappable, so it goes AFTER the code block. It is our own text (a fixed
-           sentence and the site's own address), never a name taken from outside. */
-        $tail = '';
-        if (preg_match('/\n\n(' . self::BRAKE_MARK . '[^\n]*)$/u', $text, $bm))
+        for ($hop = 0; $hop < 2; $hop++)
         {
-            $tail = $bm[1];
-            $text = substr($text, 0, -strlen($bm[0]));
+            $p = array_merge(array('chat_id' => $chat), $params);
+            if ($topic > 0)
+            {
+                $p['message_thread_id'] = $topic;
+            }
+            if ($method === 'sendMessage')
+            {
+                $p['link_preview_options'] = array('is_disabled' => true);
+                if ($silent)
+                {
+                    $p['disable_notification'] = true;
+                }
+            }
+            $r = $this->post($base . $method, (string) $this->json($p, JSON_UNESCAPED_UNICODE));
+            if ($r[0])
+            {
+                return array(true, '', 0, '', $chat, $r[3]);
+            }
+            $j = $r[3];
+            $new = $hop === 0 ? $this->migratedTo($j) : '';
+            if ($new !== '')
+            {
+                $this->tgMoved[(string) $chat] = $new;
+                $chat = $new;
+                continue;
+            }
+            return array(false, $r[1], (int) $r[2], $this->failCode('telegram', (int) $r[2], $j), $chat, $j);
         }
-        $text = str_replace('```', "`\u{200B}`\u{200B}`", $text);   // three backticks in a name cannot end the code block early
-        $parts = $this->split($text, 1990 - 8 - ($tail === '' ? 0 : $this->units($tail) + 1));   // 8 = the code block's own "```\n" and "\n```"
-        $last = count($parts) - 1;
+        return array(false, 'the group moved more than once', 0, 'chat_not_found', $chat, null);
+    }
+
+    /** The supergroup id in Telegram's "group chat was upgraded" answer, or '' (a supergroup id always starts with -100). */
+    private function migratedTo($j)
+    {
+        $x = is_array($j) && isset($j['parameters']) && is_array($j['parameters']) && isset($j['parameters']['migrate_to_chat_id'])
+            ? $j['parameters']['migrate_to_chat_id'] : null;
+        return is_scalar($x) && preg_match('/^-100[0-9]{1,17}$/', (string) $x) ? (string) $x : '';
+    }
+
+    /** "-1001234567890/12" = topic 12 of that group. @return array array(chat id, topic number or 0) */
+    private function telegramTarget($spec)
+    {
+        $spec = trim((string) $spec);
+        $topic = 0;
+        if (preg_match('#^(.+)/([0-9]{1,12})$#', $spec, $m))
+        {
+            $spec = $m[1];
+            $topic = (int) $m[2];
+        }
+        return array($spec, $topic);
+    }
+
+    /** The message in Telegram's HTML: only <b>, <i> and <blockquote expandable>; every text escaped. */
+    private function telegramHtml(array $msg)
+    {
+        $e = function ($s) { return htmlspecialchars((string) $s, ENT_NOQUOTES | ENT_SUBSTITUTE, 'UTF-8'); };
+        $out = array();
+        if ($msg['note'] !== '')
+        {
+            $out[] = '<i>' . $e($msg['note']) . '</i>';
+            $out[] = '';
+        }
+        if ($msg['head'] !== '')
+        {
+            $out[] = '<b>' . $e($msg['head']) . '</b>';
+        }
+        foreach ((array) $msg['items'] as $it)
+        {
+            $out[] = '';
+            if ($it['title'] !== '')
+            {
+                $out[] = '<b>' . $e(($it['level'] >= 0 ? '【' . $this->t('level_' . $it['level']) . '】' : '') . $it['title']) . '</b>';
+            }
+            foreach ($it['lines'] as $l)
+            {
+                $out[] = $e($l);
+            }
+            if ($it['hints'])
+            {
+                $out[] = '<blockquote expandable>' . implode("\n", array_map($e, $it['hints'])) . '</blockquote>';
+            }
+        }
+        return trim(implode("\n", $out));
+    }
+
+    /** Buttons under an alert: the emergency brake (URGENT, when set up) and "what to do". */
+    private function telegramButtons(array $msg)
+    {
+        $rows = array();
+        if ($msg['brake'] !== '')
+        {
+            $rows[] = array(array('text' => $this->t('btn_brake', (int) $this->cfg['brake_hours']), 'url' => $msg['brake']));
+        }
+        $g = $this->guideUrl();
+        if ($msg['kind'] === 'alert' && $g !== '')
+        {
+            $rows[] = array(array('text' => $this->t('btn_guide'), 'url' => $g));
+        }
+        return $rows ? array('inline_keyboard' => $rows) : null;
+    }
+
+    /**
+     * Discord webhook. Mentions never ping (allowed_mentions empty). With rich_messages, one card per finding
+     * coloured by level (red URGENT, orange notice, green check-in), the facts in a code block (shown exactly as
+     * written: a file name like __init__.php is not underlined, nothing in it becomes a link), the advice in a box
+     * of its own, the brake / "what to do" links in a last card (links inside cards get no preview).
+     * Too long for cards, or Discord refusing them (a 400): the plain form, the whole text in code blocks.
+     * Sent with ?wait=true, so "accepted" means Discord saved the message. A webhook that Discord says does not
+     * exist (404) is not used again until the address changes, as Discord asks (see discordGone()); a test sent
+     * by a person ($manual) tries it once more. The address is the key: it is never written anywhere.
+     */
+    private function sendDiscord(array $msg, $silent = false, $manual = false)
+    {
+        $card = ($this->cfg['rich_messages'] && is_array($msg['items'])) ? $this->discordCard($msg, $silent) : null;
+        $parts = null;
         $ok = 0;
         $why = '';
+        $code = '';
         foreach ($this->listOf($this->cfg['discord_webhook_url']) as $url)
         {
             if (!preg_match('#^https?://\S+$#i', $url))
             {
                 $why = 'the webhook address does not start with https://';
+                $code = 'webhook_bad';
                 continue;
             }
-            $all = true;
-            foreach ($parts as $i => $part)
+            $gone = $this->discordGone($url);
+            if ($gone !== null && !$manual)
             {
-                /* flags 4 = no link previews */
-                $body = $this->json(array('content' => "```\n" . $part . "\n```" . ($i === $last && $tail !== '' ? "\n" . $tail : ''),
-                    'allowed_mentions' => array('parse' => array()), 'flags' => 4), JSON_UNESCAPED_UNICODE);
-                $r = $this->post($url, $body);
-                if (!$r[0])
+                $why = $this->goneWhy($gone);
+                $code = $gone['code'];
+                continue;
+            }
+            $r = null;
+            if ($card !== null)
+            {
+                $r = $this->post($this->discordUrl($url), (string) $this->json($card, JSON_UNESCAPED_UNICODE), true);
+            }
+            if ($r === null || (!$r[0] && (int) $r[2] === 400))
+            {
+                if ($parts === null)
                 {
-                    $all = false;
-                    $why = $r[1];
-                    break;
+                    $parts = $this->discordPlain($msg, $silent);
+                }
+                foreach ($parts as $body)
+                {
+                    $r = $this->post($this->discordUrl($url), (string) $this->json($body, JSON_UNESCAPED_UNICODE), true);
+                    if (!$r[0])
+                    {
+                        break;
+                    }
                 }
             }
-            if ($all)
+            if ($r[0])
             {
                 $ok++;
+                if ($gone !== null)
+                {
+                    $this->discordGoneSet($url, '');
+                }
+                continue;
+            }
+            $why = $r[1];
+            $code = $this->failCode('discord', (int) $r[2], $r[3]);
+            if ((int) $r[2] === 404)
+            {
+                $this->discordGoneSet($url, $code === 'forum_thread' ? 'forum_thread' : 'webhook_gone');
             }
         }
-        return array($ok > 0, $ok > 0 ? '' : $why);
+        return array($ok > 0, $ok > 0 ? '' : $why, $ok > 0 ? '' : $code);
+    }
+
+    /** The webhook address with ?wait=true added (kept as it is when it already says). */
+    private function discordUrl($url)
+    {
+        if (preg_match('/[?&]wait=/i', $url))
+        {
+            return $url;
+        }
+        return $url . (strpos($url, '?') === false ? '?' : '&') . 'wait=true';
+    }
+
+    /**
+     * Discord's rate-limit documentation asks callers not to use a webhook again once it answered 404; repeated
+     * tries earn the sending address a temporary restriction. Remembered by a fingerprint of the address
+     * (?thread_id= included), never the address itself, with what the 404 was about: the webhook itself
+     * ('webhook_gone') or the thread named by ?thread_id= ('forum_thread').
+     *
+     * @return array|null array('at' => when Discord said so, 'code' => 'webhook_gone' | 'forum_thread'); null = not remembered
+     */
+    private function discordGone($url)
+    {
+        $f = $this->cfg['state_dir'] . '/discord-gone.json';
+        $j = is_file($f) ? json_decode((string) @file_get_contents($f), true) : null;
+        $k = hash('sha256', (string) $url);
+        if (!is_array($j) || !isset($j[$k]) || !is_array($j[$k]) || !isset($j[$k]['at']) || !is_numeric($j[$k]['at']))
+        {
+            return null;
+        }
+        return array('at' => (int) $j[$k]['at'], 'code' => isset($j[$k]['code']) && $j[$k]['code'] === 'forum_thread' ? 'forum_thread' : 'webhook_gone');
+    }
+
+    /** $code: 'webhook_gone' | 'forum_thread' to remember the 404, '' to forget it */
+    private function discordGoneSet($url, $code)
+    {
+        $f = $this->cfg['state_dir'] . '/discord-gone.json';
+        $j = is_file($f) ? json_decode((string) @file_get_contents($f), true) : null;
+        $j = is_array($j) ? $j : array();
+        $k = hash('sha256', (string) $url);
+        if ($code !== '')
+        {
+            $j[$k] = array('at' => $this->now(), 'code' => $code);
+        }
+        else
+        {
+            unset($j[$k]);
+        }
+        @file_put_contents($this->path('discord-gone.json'), (string) $this->json($j), LOCK_EX);
+    }
+
+    private function goneWhy(array $gone)
+    {
+        return 'Discord said on ' . date('Y-m-d H:i', $gone['at']) . ' that ' . ($gone['code'] === 'forum_thread' ? 'the thread in ?thread_id= does not exist'
+            : 'this webhook does not exist') . ' (HTTP 404); this address is not tried again until it changes (a test you send tries it once more)';
+    }
+
+    /** The User-Agent header: Discord asks for "DiscordBot (address, version)". */
+    private function ua($discord = false)
+    {
+        return 'User-Agent: ' . ($discord ? 'DiscordBot (https://github.com/brain113tw/line-security-alerts, ' . self::VERSION . ')'
+            : 'line-security-alerts/' . self::VERSION);
+    }
+
+    /**
+     * The plain form (as in 1.2 / 1.3): the text in a code block, where everything shows exactly as written and
+     * nothing is a link; no backticks inside can close it (see noFence()). 2000 characters a message; longer goes
+     * in parts. The emergency-brake line goes AFTER the block, so its link can be tapped — the line withBrake()
+     * wrote, nothing else: a finding line that looks like it stays inside the block.
+     * flags: 4 = no link previews, 4096 = no notification (silent).
+     */
+    private function discordPlain(array $msg, $silent)
+    {
+        $text = (string) $msg['plain'];
+        $tail = '';
+        if ((string) $msg['brake'] !== '')
+        {
+            $without = $this->withoutBrake($msg);
+            if ($without !== $text)
+            {
+                $tail = (string) substr($text, strlen($without) + 2);   // after the "\n\n"
+                $text = $without;
+            }
+        }
+        $text = $this->noFence($text);
+        $parts = $this->split($text, 1990 - 8 - ($tail === '' ? 0 : $this->units($tail) + 1));
+        $last = count($parts) - 1;
+        $out = array();
+        foreach ($parts as $i => $part)
+        {
+            $out[] = array('content' => "```\n" . $part . "\n```" . ($i === $last && $tail !== '' ? "\n" . $tail : ''),
+                'allowed_mentions' => array('parse' => array()), 'flags' => 4 | ($silent ? 4096 : 0));
+        }
+        return $out;
+    }
+
+    /** @return array|null the webhook body with cards, or null when the message does not fit Discord's card limits */
+    private function discordCard(array $msg, $silent)
+    {
+        $colors = array(2 => 0xD92D20, 1 => 0xF79009, 0 => 0x12B76A, -1 => 0x12B76A);
+        $embeds = array();
+        $total = 0;
+        foreach ((array) $msg['items'] as $it)
+        {
+            if ($msg['kind'] === 'test')
+            {
+                $color = 0x2E90FA;
+            }
+            elseif ($msg['kind'] === 'checkin')
+            {
+                $color = $msg['warn'] ? 0xF79009 : 0x12B76A;
+            }
+            else
+            {
+                $color = isset($colors[$it['level']]) ? $colors[$it['level']] : 0x98A2B3;
+            }
+            $e = array('color' => $color);
+            if ($it['title'] !== '')
+            {
+                $e['title'] = $this->cutUnits($this->discordTitle(($it['level'] >= 0 ? '【' . $this->t('level_' . $it['level']) . '】' : '') . $it['title']), 256);
+                $total += $this->units($e['title']);
+            }
+            if ($it['lines'])
+            {
+                $d = "```\n" . $this->noFence(implode("\n", $it['lines'])) . "\n```";
+                if ($this->units($d) > 4096)
+                {
+                    return null;
+                }
+                $e['description'] = $d;
+                $total += $this->units($d);
+            }
+            if ($it['hints'])
+            {
+                $v = $this->discordMd(implode("\n", $it['hints']));
+                if ($this->units($v) > 1024)
+                {
+                    return null;
+                }
+                $e['fields'] = array(array('name' => $this->t('what_to_do'), 'value' => $v));
+                $total += $this->units($v) + $this->units($this->t('what_to_do'));
+            }
+            if (count($e) > 1)
+            {
+                $embeds[] = $e;
+            }
+        }
+        if (!$embeds)
+        {
+            return null;
+        }
+        /* the links go in a card of their own (the colour of the first one): a link inside a card gets no preview */
+        $links = array();
+        if ($msg['brake'] !== '')
+        {
+            $links[] = $this->discordLink($this->t('btn_brake', (int) $this->cfg['brake_hours']), $msg['brake']);
+        }
+        $g = $this->guideUrl();
+        if ($msg['kind'] === 'alert' && $g !== '')
+        {
+            $links[] = $this->discordLink($this->t('btn_guide'), $g);
+        }
+        if ($links)
+        {
+            $d = implode("\n", $links);
+            $embeds[] = array('color' => $embeds[0]['color'], 'description' => $d);
+            $total += $this->units($d);
+        }
+        if (count($embeds) > 10 || $total > 5800)
+        {
+            return null;
+        }
+        $content = array();
+        if ($msg['note'] !== '')
+        {
+            $content[] = '*' . $this->discordMd($msg['note']) . '*';
+        }
+        if ($msg['head'] !== '')
+        {
+            $content[] = '**' . $this->discordMd($msg['head']) . '**';
+        }
+        /* the titles in the message text as well: they are what a phone notification shows, and all that is left
+           for someone whose Discord is set not to show embeds */
+        foreach ((array) $msg['items'] as $it)
+        {
+            if ($it['title'] !== '')
+            {
+                $content[] = $this->discordMd(($it['level'] >= 0 ? '【' . $this->t('level_' . $it['level']) . '】' : '') . $it['title']);
+            }
+        }
+        $c = implode("\n", $content);
+        if ($this->units($c) > 2000)
+        {
+            return null;
+        }
+        return array('content' => $c, 'embeds' => $embeds, 'allowed_mentions' => array('parse' => array()), 'flags' => $silent ? 4096 : 0);
+    }
+
+    /**
+     * Text for inside a Discord code block: every backtick followed by an invisible zero-width space, so no run of
+     * them (```, or five in a row, which would leave a closing ``` behind) can end the block early.
+     */
+    private function noFence($s)
+    {
+        return str_replace('`', "`\u{200B}", (string) $s);
+    }
+
+    /** Discord reads markdown in message text and card fields: this shows text exactly as written, nothing a link. */
+    private function discordMd($s)
+    {
+        $s = (string) preg_replace('/([\\\\*_~`|<>\[\]()#])/', '\\\\$1', (string) $s);
+        $s = (string) preg_replace('/^(\s*)([-+]|[0-9]+\.)(\s)/m', '$1\\\\$2$3', $s);   // list markers at a line start
+        return str_replace(array('://', '@everyone', '@here'), array(":\u{200B}//", "@\u{200B}everyone", "@\u{200B}here"), $s);
+    }
+
+    /** A card title: no masked links, no bare links, no mentions (titles are not escaped: see discordMd()). */
+    private function discordTitle($s)
+    {
+        return str_replace(array('](', '://', '<@', '<#', '<t:', '@everyone', '@here'),
+            array("]\u{200B}(", ":\u{200B}//", "<\u{200B}@", "<\u{200B}#", "<\u{200B}t:", "@\u{200B}everyone", "@\u{200B}here"), (string) $s);
+    }
+
+    /** [text](address) for inside a card: the text escaped, the address with nothing in it that could end the link early. */
+    private function discordLink($text, $url)
+    {
+        return '[' . $this->discordMd($text) . '](' . str_replace(array('(', ')', ' ', '<', '>'), array('%28', '%29', '%20', '%3C', '%3E'), (string) $url) . ')';
     }
 
     /**
@@ -3467,20 +4342,20 @@ final class SecurityAlerts
      * most) it waits and tries once more; a longer wait is not sat out (this may run inside a page view): the
      * message goes on to the next channel instead.
      *
-     * @return array array(bool $ok, string $whyNot)
+     * @return array array(bool $ok, string $whyNot, int $httpStatus, mixed $decodedAnswer)
      */
-    private function post($url, $body)
+    private function post($url, $body, $discord = false)
     {
         for ($try = 0; ; $try++)
         {
-            $r = (array) $this->http($url, array('Content-Type: application/json'), $body);
+            $r = (array) $this->http($url, array('Content-Type: application/json', $this->ua($discord)), $body);
             $code = isset($r[0]) ? (int) $r[0] : 0;
             $resp = isset($r[1]) ? (string) $r[1] : '';
-            $json = json_decode($resp, true);
-            /* Telegram says {"ok":false,…} on errors; Discord answers 204 with no body */
+            $json = json_decode($resp, true, 64, JSON_BIGINT_AS_STRING);   // Telegram chat ids can pass 32 bits
+            /* Telegram says {"ok":false,…} on errors; Discord answers 204 with no body (200 and the message with ?wait=true) */
             if ($code >= 200 && $code < 300 && !(is_array($json) && isset($json['ok']) && $json['ok'] === false))
             {
-                return array(true, '');
+                return array(true, '', $code, $json);
             }
             if ($code === 429 && $try === 0)
             {
@@ -3491,7 +4366,7 @@ final class SecurityAlerts
                     continue;
                 }
             }
-            return array(false, $this->failReason($code, $resp) . ($code === 429 && $try > 0 ? ' (after one retry)' : ''));
+            return array(false, $this->failReason($code, $resp) . ($code === 429 && $try > 0 ? ' (after one retry)' : ''), $code, $json);
         }
     }
 
@@ -3557,6 +4432,83 @@ final class SecurityAlerts
     }
 
     /**
+     * A short word for why a channel refused, from its answer: blocked | kicked | chat_not_found | topic_gone |
+     * token | webhook_gone | webhook_bad | forum_thread | recipient_gone | quota | rate | server | network | other.
+     * failHint() and the "chw_" texts turn it into plain words. Telegram's error texts are not a promise of its
+     * documentation ("subject to change"): a text not recognised is simply 'other'.
+     */
+    private function failCode($ch, $code, $json)
+    {
+        $d = '';
+        if (is_array($json))
+        {
+            foreach (array('description', 'message') as $k)
+            {
+                if (isset($json[$k]) && is_string($json[$k]))
+                {
+                    $d = strtolower($json[$k]);
+                    break;
+                }
+            }
+        }
+        $code = (int) $code;
+        if ($code <= 0)
+        {
+            return 'network';
+        }
+        if ($code === 429)
+        {
+            return ($ch === 'line' && strpos($d, 'monthly limit') !== false) ? 'quota' : 'rate';
+        }
+        if ($code >= 500)
+        {
+            return 'server';
+        }
+        if ($ch === 'telegram')
+        {
+            if (strpos($d, 'blocked') !== false) { return 'blocked'; }
+            if (strpos($d, 'kicked') !== false || strpos($d, 'not a member') !== false || strpos($d, 'not enough rights') !== false) { return 'kicked'; }
+            if (strpos($d, 'thread not found') !== false) { return 'topic_gone'; }
+            if (strpos($d, 'chat not found') !== false || strpos($d, "can't initiate") !== false || strpos($d, 'deactivated') !== false
+                || strpos($d, 'chat was deleted') !== false) { return 'chat_not_found'; }
+            if ($code === 401 || $code === 404) { return 'token'; }
+        }
+        elseif ($ch === 'discord')
+        {
+            $dc = is_array($json) && isset($json['code']) && is_numeric($json['code']) ? (int) $json['code'] : 0;
+            if (in_array($dc, array(220001, 220002, 220003, 10003), true)) { return 'forum_thread'; }   // forum needs a thread; unknown thread
+            if ($code === 404) { return 'webhook_gone'; }
+            if ($code === 401 || $code === 403) { return 'webhook_bad'; }
+        }
+        elseif ($ch === 'line')
+        {
+            if ($code === 401) { return 'token'; }
+        }
+        return 'other';
+    }
+
+    /** What to do about a failCode(), in plain English (for the command line: --test-all, --status). */
+    private function failHint($code)
+    {
+        $h = array(
+            'blocked'        => 'the bot was blocked: open the bot in Telegram and tap Restart (or unblock it)',
+            'kicked'         => 'the bot is no longer in that group, or may not post there: add it again / let it send messages',
+            'chat_not_found' => 'no such chat for this bot: check telegram_chat_id (run --telegram-chats), and press Start in the bot first',
+            'topic_gone'     => 'the topic after "/" in telegram_chat_id does not exist (deleted?): run --telegram-chats for the current number',
+            'forum_thread'   => 'this webhook is in a forum channel, or ?thread_id= names a post that is gone: put ?thread_id=<the post\'s id> at the end of discord_webhook_url',
+            'token'          => 'the key is wrong or was revoked: get the current one (@BotFather for Telegram, the LINE Developers console for LINE)',
+            'webhook_gone'   => 'the webhook was deleted: create a new one and update discord_webhook_url',
+            'webhook_bad'    => 'the webhook address is wrong or cut short: copy it again',
+            'recipient_gone' => 'a recipient in line_to blocked the account or never added it as a friend (or the account is not in that group)',
+            'quota'          => "LINE's monthly allowance is used up",
+            'rate'           => 'too many requests right now: it should pass in a minute',
+            'server'         => 'the service had an error on its side: usually passes by itself',
+            'network'        => 'no answer: the server could not reach the service (network, firewall, DNS)',
+        );
+        return isset($h[$code]) ? $h[$code] : '';
+    }
+
+    /**
      * Splits a message at line breaks into parts of at most $limit UTF-16 code units (the unit Telegram and
      * Discord count in: an emoji is two). When there is more than one part, each starts with "(1/2) " and so
      * on. At most 4 parts; the rest is cut with "…" (messages are composed much shorter than that anyway).
@@ -3567,7 +4519,7 @@ final class SecurityAlerts
         {
             return array($text);
         }
-        $budget = $limit - 8;   // room for "(1/4) "
+        $budget = max(16, $limit - 8);   // room for "(1/4) "; never so small that a part could hold nothing
         $parts = array();
         $cur = '';
         foreach (explode("\n", $text) as $line)
@@ -3668,6 +4620,17 @@ final class SecurityAlerts
      *                    configured, the check is switched off, or LINE did not answer
      */
     private function lineQuota()
+    {
+        /* asked once per run at most: the weekly check-in and the channel check both want it */
+        $now = $this->now();
+        if ($this->quotaMemo === null || $this->quotaMemo['at'] !== $now)
+        {
+            $this->quotaMemo = array('at' => $now, 'q' => $this->lineQuotaAsk());
+        }
+        return $this->quotaMemo['q'];
+    }
+
+    private function lineQuotaAsk()
     {
         $token = (string) $this->cfg['line_channel_access_token'];
         if (!$this->cfg['line_quota_check'] || $token === '' || !$this->cfg['line_to'])
@@ -4065,6 +5028,28 @@ final class SecurityAlerts
                 'brake_locked_hint' => 'If nobody on your side did this, someone has your alert messages or is on the server: tell your developer. To end it early: --unlock on the server.',
                 'brake_unlocked_title' => 'The admin area is unlocked',
                 'brake_unlocked_body' => 'The emergency lock was ended by command on the server at %s.',
+                'btn_brake' => "\u{1F6D1} Lock the admin area for %d hours",
+                'btn_guide' => "\u{1F4D6} What to do",
+                'what_to_do' => 'What to do',
+                'name_sep' => ', ',
+                'hb_channels_ok' => 'Channels checked without sending a message: %s OK.',
+                'hb_channels_bad' => '⚠ Not working right now: %s. Messages that would go there go to the next channel instead, or wait. Have your developer run --test-all.',
+                'ch_with_reason' => '%s (%s)',
+                'ch_name_telegram' => 'Telegram', 'ch_name_discord' => 'Discord', 'ch_name_line' => 'LINE', 'ch_name_mail' => 'e-mail', 'ch_name_custom' => 'your own channel',
+                'chw_blocked' => 'the bot was blocked',
+                'chw_kicked' => 'the bot was removed from the group',
+                'chw_chat_not_found' => 'the chat was not found',
+                'chw_topic_gone' => 'the topic was not found',
+                'chw_forum_thread' => 'the forum post (thread_id) is missing or gone',
+                'chw_token' => 'the key is wrong or was revoked',
+                'chw_webhook_gone' => 'the webhook was deleted',
+                'chw_webhook_bad' => 'the webhook address is wrong',
+                'chw_recipient_gone' => 'a recipient blocked the account or is not a friend',
+                'chw_quota' => 'the monthly allowance is used up',
+                'chw_rate' => 'too many requests for now',
+                'chw_server' => 'the service had an error',
+                'chw_network' => 'no answer',
+                'chw_other' => 'it refused',
             ),
             'zh-TW' => array(
                 'header' => "🔒 網站安全提醒｜%s（%s）",
@@ -4181,6 +5166,28 @@ final class SecurityAlerts
                 'brake_locked_hint' => '如果不是你們這邊按的，代表有人拿到了你的通知訊息，或已經在主機上：請告訴工程師。要提早解鎖：在主機上執行 --unlock。',
                 'brake_unlocked_title' => '後台已經解鎖',
                 'brake_unlocked_body' => '%s 在主機上用指令結束了緊急鎖定。',
+                'btn_brake' => "\u{1F6D1} 把後台鎖住 %d 小時",
+                'btn_guide' => "\u{1F4D6} 收到通知怎麼辦",
+                'what_to_do' => '怎麼做',
+                'name_sep' => '、',
+                'hb_channels_ok' => '通知管道正常：%s（沒有發訊息，只確認連得上）。',
+                'hb_channels_bad' => '⚠ 有通知管道現在不能用：%s。原本要走它的訊息會改走下一個管道，或先留著。請工程師跑 --test-all 看原因。',
+                'ch_with_reason' => '%s（%s）',
+                'ch_name_telegram' => 'Telegram', 'ch_name_discord' => 'Discord', 'ch_name_line' => 'LINE', 'ch_name_mail' => 'Email', 'ch_name_custom' => '自訂管道',
+                'chw_blocked' => '機器人被封鎖了',
+                'chw_kicked' => '機器人被移出群組',
+                'chw_chat_not_found' => '找不到這個聊天室',
+                'chw_topic_gone' => '找不到這個討論主題',
+                'chw_forum_thread' => '論壇頻道要指定貼文（thread_id），或那篇貼文不在了',
+                'chw_token' => '金鑰錯了或被撤銷',
+                'chw_webhook_gone' => 'Webhook 被刪掉了',
+                'chw_webhook_bad' => 'Webhook 網址不對',
+                'chw_recipient_gone' => '有收件人封鎖了帳號，或還不是好友',
+                'chw_quota' => '這個月的則數用完了',
+                'chw_rate' => '請求太多，暫時被擋',
+                'chw_server' => '對方伺服器出錯',
+                'chw_network' => '連不上',
+                'chw_other' => '被拒絕',
             ),
         );
         $lang = isset($s[$this->cfg['language']]) ? $this->cfg['language'] : 'en';

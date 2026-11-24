@@ -65,6 +65,16 @@ function rrmdir($d)
  */
 function fake_quota($url, &$box)
 {
+    if (preg_match('#/v2/bot/(info|profile/|group/)#', $url))
+    {
+        /* the channel check (checkChannels()): counted apart. $box['line_health']: 'token' = the key is refused,
+           'gone' = recipients answer 404 (blocked / not a friend); not set = all fine */
+        $box['health_gets'] = (isset($box['health_gets']) ? $box['health_gets'] : 0) + 1;
+        $h = isset($box['line_health']) ? $box['line_health'] : '';
+        if ($h === 'token') { return array(401, '{"message":"Authentication failed. Confirm that the access token in the authorization header is valid."}'); }
+        if ($h === 'gone' && strpos($url, '/v2/bot/info') === false) { return array(404, '{"message":"Not found"}'); }
+        return array(200, '{"displayName":"zz"}');
+    }
     if (strpos($url, '/v2/bot/insight/followers') !== false)
     {
         /* "how many friends": counted apart from the allowance questions. $box['friends']: not set = LINE says
@@ -1211,6 +1221,7 @@ if (function_exists('exec'))
     file_put_contents($app2 . '/bin/security-alerts.config.php', '<?php return ' . var_export(array(
         'state_dir' => $state13, 'site_root' => $site13, 'site_name' => 'Status shop', 'timezone' => 'UTC',
         'line_channel_access_token' => 'TOKEN-SECRET-9f2c', 'line_to' => array('Usecret0123456789'), 'ping_url' => 'https://checkin.example/ping/PING-SECRET-77',
+        'line_api_base' => 'https://api.line.invalid',   // --status asks the channels: no real request from a test
     ), true) . ";\n");
     $lines = array();
     exec(escapeshellarg(PHP_BINARY) . ' ' . escapeshellarg($app2 . '/bin/security-alerts-cron.php') . ' --status', $lines, $code);
@@ -1228,12 +1239,25 @@ else
 echo "Telegram and Discord\n";
 $clock = strtotime('2026-03-02 10:00:00 UTC');
 $calls = array();
+$checks = array();   // the channel checks (checkChannels(), --telegram-chats): kept apart from the messages
 $answer = array();   // service => list of array(status, body) to answer in turn; nothing listed = accepted
 $slept = array();
-$net = function ($url, $headers, $body, $method = 'POST') use (&$calls, &$answer, &$box) {
+$net = function ($url, $headers, $body, $method = 'POST') use (&$calls, &$checks, &$answer, &$box) {
+    $kind = '';
+    if (preg_match('#/bot[^/]+/(getChat|getChatMember|sendChatAction|getUpdates)$#', $url, $km)) { $kind = 'tg:' . $km[1]; }
+    elseif ($method === 'GET' && strpos($url, '/api/webhooks/') !== false) { $kind = 'dc:get'; }
+    if ($kind !== '')
+    {
+        $checks[] = array('svc' => $kind, 'url' => $url, 'body' => json_decode($body, true), 'headers' => $headers);
+        if (!empty($answer[$kind])) { return array_shift($answer[$kind]); }
+        if ($kind === 'tg:getChat') { return array(200, '{"ok":true,"result":{"id":-100777,"type":"supergroup","title":"zz"}}'); }
+        if ($kind === 'tg:getChatMember') { return array(200, '{"ok":true,"result":{"status":"administrator","can_post_messages":true,"user":{"id":123456,"is_bot":true}}}'); }
+        if ($kind === 'dc:get') { return array(200, '{"id":"1","type":1,"name":"zz"}'); }
+        return array(200, '{"ok":true,"result":' . ($kind === 'tg:getUpdates' ? '[]' : 'true') . '}');
+    }
     $svc = strpos($url, '/sendMessage') !== false ? 'telegram' : (strpos($url, '/api/webhooks/') !== false ? 'discord' : 'line');
     if ($svc === 'line' && $method === 'GET') { return fake_quota($url, $box); }
-    $calls[] = array('svc' => $svc, 'url' => $url, 'body' => json_decode($body, true));
+    $calls[] = array('svc' => $svc, 'url' => $url, 'body' => json_decode($body, true), 'headers' => $headers);
     if (!empty($answer[$svc])) { $next = array_shift($answer[$svc]); if ($next === 'throw') { throw new RuntimeException('boom at ' . $url); } return $next; }
     return $svc === 'telegram' ? array(200, '{"ok":true,"result":{"message_id":1}}') : ($svc === 'discord' ? array(204, '') : array(200, '{}'));
 };
@@ -1243,7 +1267,10 @@ $units = function ($s) { return preg_match_all('/./us', $s) + preg_match_all('/[
 $tg = array('telegram_bot_token' => '123456:TG-SECRET-abc', 'telegram_chat_id' => '-100777', 'telegram_api_base' => 'https://tg.example');
 $dc = array('discord_webhook_url' => 'https://discord.example/api/webhooks/1/DC-SECRET-xyz');
 $noLine = array('line_channel_access_token' => '', 'mail_to' => '');
-$base = array('timezone' => 'UTC', 'transport' => $net, 'sleeper' => function ($s) use (&$slept) { $slept[] = $s; });
+/* plain text and every message ringing: the form of 1.2 / 1.3, still what is sent when cards or HTML are refused
+   (the 1.4 layouts and the quiet notices have their own section below) */
+$base = array('timezone' => 'UTC', 'transport' => $net, 'sleeper' => function ($s) use (&$slept) { $slept[] = $s; },
+    'rich_messages' => false, 'ring_level' => 0);
 
 $a = make($box, $clock, array_merge($base, $tg, $noLine));
 $a->custom('Telegram path', array('file __init__.php and *stars* <b>'), SecurityAlerts::NOTICE, 'tg1');
@@ -1262,7 +1289,9 @@ $a->custom('Discord path', array('account "@everyone" tried [reset](https://evil
 $r = $a->run();
 $d = $via('discord');
 $c = $d ? $d[0]['body'] : array();
-check('Discord only: the alert goes to the webhook; 204 (no body) counts as delivered', $r['sent'] === 'discord' && count($d) === 1 && $d[0]['url'] === $dc['discord_webhook_url'], json_encode($calls));
+check('Discord only: the alert goes to the webhook (with ?wait=true: Discord confirms it saved it); 204 (no body) counts as delivered too',
+    $r['sent'] === 'discord' && count($d) === 1 && $d[0]['url'] === $dc['discord_webhook_url'] . '?wait=true'
+    && in_array('User-Agent: DiscordBot (https://github.com/brain113tw/line-security-alerts, ' . SecurityAlerts::VERSION . ')', $d[0]['headers'], true), json_encode($calls));
 check('Discord: mentions switched off, no link previews, the text in one code block that a name cannot close early',
     isset($c['allowed_mentions']) && $c['allowed_mentions'] === array('parse' => array()) && $c['flags'] === 4
     && strpos($c['content'], "```\n") === 0 && substr($c['content'], -4) === "\n```" && substr_count($c['content'], '```') === 2
@@ -1277,7 +1306,7 @@ $answer['telegram'] = array(array(500, '{"ok":false,"error_code":500,"descriptio
 $a->custom('order', array('two'), SecurityAlerts::NOTICE, 'or2');
 $clock += 300; $calls = array(); $r = $a->run();
 check('Telegram answers 500: Discord takes it', $r['sent'] === 'discord' && $order() === 'telegram,discord', $order());
-$answer = array('telegram' => array(array(401, '{"ok":false,"error_code":401,"description":"Unauthorized"}')), 'discord' => array(array(404, '{"message":"Unknown Webhook","code":10015}')));
+$answer = array('telegram' => array(array(401, '{"ok":false,"error_code":401,"description":"Unauthorized"}')), 'discord' => array(array(401, '{"message":"Invalid Webhook Token","code":50027}')));
 $a->custom('order', array('three'), SecurityAlerts::NOTICE, 'or3');
 $clock += 300; $calls = array(); $r = $a->run();
 check('Telegram and Discord refuse: LINE takes it', $r['sent'] === 'line' && $order() === 'telegram,discord,line', $order());
@@ -1410,8 +1439,9 @@ $box['quota'] = array(150, 200);
 $a->run();
 $clock = strtotime('2026-03-09 10:00:00 UTC'); $calls = array(); $r = $a->run();
 $t = $via('telegram');
-check('LINE only as a backup that sent nothing: no LINE line in the check-in, LINE is not even asked',
-    $r['heartbeat'] === 'telegram' && strpos($t[0]['body']['text'], 'LINE messages') === false && !isset($box['gets']), json_encode($t));
+check('LINE only as a backup that sent nothing: no allowance line in the check-in (LINE is only checked, with the other channels)',
+    $r['heartbeat'] === 'telegram' && strpos($t[0]['body']['text'], 'LINE messages') === false
+    && strpos($t[0]['body']['text'], 'Channels checked without sending a message: Telegram, LINE OK.') !== false, json_encode($t));
 $answer = array('telegram' => array(array(500, '')));
 $a->custom('carried by LINE', array('x'), SecurityAlerts::NOTICE, 'bk1');
 $clock += 300; $r = $a->run();
@@ -1435,8 +1465,9 @@ $a = make($box, $clock, array_merge($base, $tg, $dc));
 $each = $a->testEachChannel();
 check('testEachChannel(): every channel tried on its own, with the reason when it fails, and no key in the reason',
     array_keys($each) === array('telegram', 'discord', 'line', 'mail') && !$each['telegram']['ok'] && strpos($each['telegram']['why'], 'HTTP 400: Bad Request: chat not found') === 0
-    && strpos($each['telegram']['why'], 'TG-SECRET') === false && $each['discord'] === array('ok' => false, 'why' => 'HTTP 404: Unknown Webhook')
-    && $each['line']['ok'] && $each['mail']['ok'] && $order() === 'telegram,discord,line', json_encode($each));
+    && strpos($each['telegram']['why'], 'TG-SECRET') === false && strpos($each['telegram']['hint'], 'run --telegram-chats') !== false
+    && $each['discord'] === array('ok' => false, 'why' => 'HTTP 404: Unknown Webhook', 'hint' => 'the webhook was deleted: create a new one and update discord_webhook_url')
+    && $each['line'] === array('ok' => true, 'why' => '', 'hint' => '') && $each['mail']['ok'] && $order() === 'telegram,discord,line', json_encode($each));
 $calls = array();
 $a = make($box, $clock, array_merge($base, $tg, $noLine, array('telegram_bot_token' => 'not a token/../x')));
 $each = $a->testEachChannel();
@@ -1472,7 +1503,8 @@ if (function_exists('exec'))
     file_put_contents($app3 . '/bin/security-alerts.config.php', '<?php return ' . var_export(array(
         'state_dir' => tmpdir('state-cron3'), 'site_name' => 'Route shop', 'timezone' => 'UTC', 'line_min_level' => 2,
         'line_channel_access_token' => 'TOKEN-SECRET-9f2c', 'line_to' => array('Usecret0123456789'),
-        'telegram_bot_token' => '123456:TG-SECRET-abc', 'telegram_chat_id' => '-100777', 'discord_webhook_url' => 'https://discord.example/api/webhooks/1/DC-SECRET-xyz',
+        'telegram_bot_token' => '123456:TG-SECRET-abc', 'telegram_chat_id' => '-100777', 'discord_webhook_url' => 'https://discord.invalid/api/webhooks/1/DC-SECRET-xyz',
+        'telegram_api_base' => 'https://api.telegram.invalid', 'line_api_base' => 'https://api.line.invalid',   // no real request from a test
     ), true) . ";\n");
     $lines = array();
     exec(escapeshellarg(PHP_BINARY) . ' ' . escapeshellarg($app3 . '/bin/security-alerts-cron.php') . ' --status', $lines, $code);
@@ -1481,6 +1513,20 @@ if (function_exists('exec'))
         strpos($out, 'alerts go to      : Telegram (1 chat), then Discord (1 webhook)  (no e-mail fallback)') !== false
         && strpos($out, 'urgent ones       : LINE (1 recipient), then Telegram (1 chat), then Discord (1 webhook)  (line_min_level 2)') !== false
         && strpos($out, 'SECRET') === false && strpos($out, 'Usecret') === false && strpos($out, '-100777') === false, $out);
+    check('cron entry --status: each channel asked (here none can be reached), who rings, and what to do about it',
+        strpos($out, 'channels answer   : Telegram PROBLEM (see below), Discord PROBLEM (see below), LINE PROBLEM (see below)') !== false
+        && strpos($out, 'ringing           : only URGENT alerts ring; notices and the check-in arrive quietly') !== false
+        && strpos($out, '!! Telegram does not work (checked ') !== false && strpos($out, 'no answer: the server could not reach the service') !== false, $out);
+    $lines = array();
+    exec(escapeshellarg(PHP_BINARY) . ' ' . escapeshellarg($app3 . '/bin/security-alerts-cron.php') . ' --test-all', $lines, $code);
+    $out = implode("\n", $lines);
+    check('cron entry --test-all: every failure followed by what to do', $code === 1 && substr_count($out, 'what to do: no answer: the server could not reach the service') === 3
+        && strpos($out, 'SECRET') === false, $out);
+    $lines = array();
+    exec(escapeshellarg(PHP_BINARY) . ' ' . escapeshellarg($app3 . '/bin/security-alerts-cron.php') . ' --telegram-chats', $lines, $code);
+    $out = implode("\n", $lines);
+    check('cron entry --telegram-chats: says so when Telegram cannot be reached, no token shown', $code === 1
+        && strpos($out, "could not read the bot's chats: no answer") === 0 && strpos($out, 'SECRET') === false, $out);
 }
 
 /* ------------------------------------------------------------------ */
@@ -1862,6 +1908,438 @@ preg_match('/t=([0-9]+)\./', $old, $o1);
 preg_match('/t=([0-9]+)\./', $new, $o2);
 check('a delayed URGENT alert carries a fresh link (the kept one would have expired)', strpos($new, 'Delayed') !== false && substr_count($new, 'brake.php') === 1
     && isset($o1[1], $o2[1]) && (int) $o2[1] > (int) $o1[1], $new);
+
+/* ------------------------------------------------------------------ */
+echo "Quiet notices, Telegram and Discord layouts, setup, channel checks (1.4)\n";
+$clock = strtotime('2026-03-02 10:00:00 UTC');
+$rich = array('timezone' => 'UTC', 'transport' => $net, 'sleeper' => function ($s) use (&$slept) { $slept[] = $s; });   // rich_messages, ring_level as shipped
+$first = function ($svc) use ($via) { $v = $via($svc); return $v ? $v[0]['body'] : array(); };
+$guideEn = 'https://github.com/brain113tw/line-security-alerts/blob/main/skills/line-security-alerts/reference/when-an-alert-arrives.md';
+$dcUa = 'User-Agent: DiscordBot (https://github.com/brain113tw/line-security-alerts, ' . SecurityAlerts::VERSION . ')';
+$answer = array();
+
+/* who rings: ring_level */
+$quiet = array();
+$n = 0;
+foreach (array('line' => array('mail_to' => ''), 'telegram' => array_merge($tg, $noLine), 'discord' => array_merge($dc, $noLine)) as $svc => $only)
+{
+    foreach (array('default' => array(), '1' => array('ring_level' => 1), '0' => array('ring_level' => 0)) as $rk => $ring)
+    {
+        foreach (array(SecurityAlerts::NOTICE, SecurityAlerts::URGENT) as $lv)
+        {
+            $calls = array();
+            $a = make($box, $clock, array_merge($rich, $only, $ring));
+            $a->custom('ring?', array('x'), $lv, 'ring' . (++$n));
+            $a->run();
+            $b = $first($svc);
+            $quiet[$svc][$rk][$lv] = $svc === 'line' ? array_key_exists('notificationDisabled', $b) && $b['notificationDisabled'] === true
+                : ($svc === 'telegram' ? array_key_exists('disable_notification', $b) && $b['disable_notification'] === true : isset($b['flags']) && ($b['flags'] & 4096) === 4096);
+            if (!$b) { $quiet[$svc][$rk][$lv] = 'not sent'; }
+        }
+    }
+}
+$want = array('default' => array(1 => true, 2 => false), '1' => array(1 => false, 2 => false), '0' => array(1 => false, 2 => false));
+check('ring_level 2 (the default): notices arrive without ringing on LINE, Telegram and Discord; URGENT ones ring; 1 and 0: notices ring too',
+    $quiet === array('line' => $want, 'telegram' => $want, 'discord' => $want), json_encode($quiet));
+$calls = array();
+$a = make($box, $clock, array_merge($rich, array('mail_to' => '')));
+$a->custom('urgent', array('x'), SecurityAlerts::URGENT, 'rq');
+$a->run();
+$b = $first('line');
+check('a message that rings is sent exactly as before (LINE: no notificationDisabled field at all)', $b && !array_key_exists('notificationDisabled', $b), json_encode($b));
+$calls = array();
+$a = make($box, $clock, array_merge($rich, $tg, $noLine));
+$a->sendTest();
+$b = $first('telegram');
+check('a test message always rings', $b && !array_key_exists('disable_notification', $b), json_encode($b));
+$quietCheckin = array();
+foreach (array(0, 1) as $ring)
+{
+    $clock = strtotime('2026-03-02 10:00:00 UTC');
+    $a = make($box, $clock, array_merge($rich, array('mail_to' => '', 'ring_level' => $ring)));
+    $a->run();
+    $clock = strtotime('2026-03-09 10:00:00 UTC'); $calls = array();
+    $r = $a->run();
+    $b = $first('line');
+    $quietCheckin[$ring] = $r['heartbeat'] === 'line' && !empty($b['notificationDisabled']);
+}
+check('the weekly check-in is quiet from ring_level 1 up, rings with 0', $quietCheckin === array(0 => false, 1 => true), json_encode($quietCheckin));
+$got = array();
+$clock = strtotime('2026-03-02 10:00:00 UTC');
+$a = make($box, $clock, array_merge($rich, array('notifier' => function ($text, $level, $silent = null) use (&$got) { $got[] = array($level, $silent); return true; })));
+$a->custom('n', array('x'), SecurityAlerts::NOTICE, 'nq1');
+$clock += 60; $a->run();
+$a->custom('u', array('x'), SecurityAlerts::URGENT, 'nq2');
+$clock += 60; $a->run();
+check('your own notifier is told whether to ring (third argument; a notifier with two parameters works as before)', $got === array(array(1, true), array(2, false)), json_encode($got));
+
+/* Telegram: HTML, advice folded away, buttons */
+$calls = array();
+$a = make($box, $clock, array_merge($rich, $tg, $noLine, array('site_name' => 'Shop <b>&')));
+$a->loginSucceeded('alice', '192.0.2.10', $office);
+$clock += 60; $a->run();
+$a->loginSucceeded('alice', '203.0.113.50', 'Mozilla/5.0 (X11; Linux x86_64; rv:140.0) Gecko/20100101 Firefox/140.0');
+$a->custom('Odd <file> & co', array('file __init__.php and *stars* <b>'), SecurityAlerts::NOTICE, 'tgh');
+$clock += 60; $r = $a->run();
+$b = $first('telegram');
+$tx = isset($b['text']) ? (string) $b['text'] : '';
+check('Telegram: HTML, the header and every title in bold, all text escaped (<, >, &) and otherwise as written',
+    $r['sent'] === 'telegram' && $b['parse_mode'] === 'HTML' && strpos($tx, '<b>🔒 Security alert | Shop &lt;b&gt;&amp; (') === 0
+    && strpos($tx, "<b>【Notice】Odd &lt;file&gt; &amp; co</b>\nfile __init__.php and *stars* &lt;b&gt;") !== false
+    && preg_match('#<b>【Notice】Admin "alice" signed in from a new device and network</b>#u', $tx) === 1
+    && strpos(preg_replace('#</?(b|i|blockquote)( expandable)?>#', '', $tx), '<') === false, $tx);
+check('Telegram: the advice is folded away under the facts (a quote that opens on a tap)',
+    strpos($tx, '<blockquote expandable>A staff member on a new phone or travelling?') !== false && substr_count($tx, '<blockquote expandable>') === 1, $tx);
+check('Telegram: a "What to do" button (the guide), no link preview, quiet (a notice)',
+    isset($b['reply_markup']) && $b['reply_markup'] === array('inline_keyboard' => array(array(array('text' => '📖 What to do', 'url' => $guideEn))))
+    && $b['link_preview_options'] === array('is_disabled' => true) && $b['disable_notification'] === true, json_encode($b));
+$calls = array();
+$a = make($box, $clock, array_merge($brake, $rich, $tg, $noLine, array('language' => 'zh-TW')));
+$a->custom('緊急', array('x'), SecurityAlerts::URGENT, 'tgu');
+$clock += 60; $a->run();
+$b = $first('telegram');
+$rows = isset($b['reply_markup']['inline_keyboard']) ? $b['reply_markup']['inline_keyboard'] : array();
+check('Telegram URGENT: rings, a brake button (fresh signed link) and the guide in the message\'s language; the link is not repeated in the text',
+    $b && !array_key_exists('disable_notification', $b) && count($rows) === 2 && $rows[0][0]['text'] === '🛑 把後台鎖住 4 小時'
+    && preg_match('#^https://shop\.example/brake\.php\?t=[0-9]+\.[0-9a-f]{16}\.[0-9a-f]{32}$#', $rows[0][0]['url']) === 1
+    && $rows[1][0] === array('text' => '📖 收到通知怎麼辦', 'url' => str_replace('.md', '.zh-TW.md', $guideEn)) && strpos($b['text'], 'brake.php') === false, json_encode($b));
+$calls = array();
+$answer = array('telegram' => array(array(400, '{"ok":false,"error_code":400,"description":"Bad Request: can\'t parse entities: Unsupported start tag \"x\" at byte offset 3"}')));
+$a = make($box, $clock, array_merge($brake, $rich, $tg, $noLine));
+$a->custom('Refused HTML', array('x'), SecurityAlerts::URGENT, 'tgf');
+$clock += 60; $r = $a->run();
+$t = $via('telegram');
+check('Telegram refusing the HTML or a button (400): the same alert at once as plain text, brake link in the text',
+    $r['sent'] === 'telegram' && count($t) === 2 && $t[0]['body']['parse_mode'] === 'HTML' && !isset($t[1]['body']['parse_mode']) && !isset($t[1]['body']['reply_markup'])
+    && preg_match('#\n\n🛑 [^\n]*https://shop\.example/brake\.php\?t=\S+$#u', $t[1]['body']['text']) === 1, json_encode($t));
+$calls = array();
+$answer = array('telegram' => array(array(403, '{"ok":false,"error_code":403,"description":"Forbidden: bot was blocked by the user"}')));
+$a = make($box, $clock, array_merge($rich, $tg));   // LINE and e-mail behind it
+$a->custom('Blocked', array('x'), SecurityAlerts::NOTICE, 'tgb');
+$clock += 60; $r = $a->run();
+check('Telegram refusing for another reason (blocked, 403): no plain-text retry, the next channel takes it', $r['sent'] === 'line' && $order() === 'telegram,line', $order());
+$ok3 = array();
+foreach (array('' => null, 'https://wiki.example/what-to-do' => 'https://wiki.example/what-to-do', 'javascript:alert(1)' => null) as $gu => $exp)
+{
+    $calls = array();
+    $a = make($box, $clock, array_merge($rich, $tg, $noLine, array('guide_url' => $gu)));
+    $a->custom('guide', array('x'), SecurityAlerts::NOTICE, 'gu' . md5($gu));
+    $clock += 60; $a->run();
+    $b = $first('telegram');
+    $ok3[] = $exp === null ? !isset($b['reply_markup']) : $b['reply_markup']['inline_keyboard'][0][0]['url'] === $exp;
+}
+check('guide_url: empty = no button; your own address is used; anything that is not http(s) is ignored', $ok3 === array(true, true, true), json_encode($ok3));
+$calls = array();
+$a = make($box, $clock, array_merge($rich, $tg, $noLine, array('telegram_chat_id' => '-100777/12')));
+$a->custom('Topic', array('x'), SecurityAlerts::NOTICE, 'tgt');
+$clock += 60; $a->run();
+$b = $first('telegram');
+check('a topic ("-100777/12"): sent to that group, into topic 12', $b && $b['chat_id'] === '-100777' && $b['message_thread_id'] === 12, json_encode($b));
+$calls = array();
+$answer = array('telegram' => array(array(400, '{"ok":false,"error_code":400,"description":"Bad Request: group chat was upgraded to a supergroup chat","parameters":{"migrate_to_chat_id":-1001234567890}}')));
+$a = make($box, $clock, array_merge($rich, $tg, $noLine, array('telegram_chat_id' => '-4242')));
+$a->custom('Moved', array('x'), SecurityAlerts::NOTICE, 'tgm1');
+$clock += 60; $r = $a->run();
+$t = $via('telegram');
+check('a group that became a supergroup: Telegram names the new id and the alert goes there at once',
+    $r['sent'] === 'telegram' && count($t) === 2 && $t[0]['body']['chat_id'] === '-4242' && $t[1]['body']['chat_id'] === '-1001234567890' && $t[1]['body']['parse_mode'] === 'HTML', json_encode($t));
+$calls = array();
+$migrated = array(400, '{"ok":false,"error_code":400,"description":"Bad Request: group chat was upgraded to a supergroup chat","parameters":{"migrate_to_chat_id":-1001234567890}}');
+$answer = array('telegram' => array($migrated));
+$a->custom('Moved 2', array('x'), SecurityAlerts::NOTICE, 'tgm2');
+$clock += 60; $a->run();
+$t = $via('telegram');
+/* the channel check: the old id (moved), then the new one (fine); then telegramChats() asking about the old id */
+$answer = array('tg:getChat' => array($migrated, array(200, '{"ok":true,"result":{"id":-1001234567890,"type":"supergroup","title":"zz"}}'), $migrated));
+$a->checkChannels();
+$s = $a->status();
+$tc = $a->telegramChats();
+$answer = array();
+check('...each message follows Telegram\'s answer again (nothing stored); after a channel check status() asks to update telegram_chat_id without showing ids; telegramChats() asks Telegram and names both',
+    count($t) === 2 && $t[1]['body']['chat_id'] === '-1001234567890' && $s['telegram_moved'] === 1
+    && count(preg_grep('/became a supergroup and has a new id \(seen [0-9\/: ]+\); alerts still reach it\. Run --telegram-chats/', $s['problems'])) === 1
+    && strpos(json_encode($s), '1234567890') === false && $tc['moved'] === array('-4242' => '-1001234567890'), json_encode($t) . json_encode($s['problems']) . json_encode($tc));
+$calls = array();
+$sdm = tmpdir('state-moved');
+file_put_contents($sdm . '/telegram-moved.json', '{"-100777":"-100666"}');   // what an intruder might write
+$a = make($box, $clock, array_merge($rich, $tg, $noLine, array('state_dir' => $sdm)));
+$a->custom('Not redirected', array('x'), SecurityAlerts::URGENT, 'tgr');
+$clock += 60; $a->run();
+$t = $via('telegram');
+check('no file on the server decides where Telegram alerts go (a planted "moved" record changes nothing)', count($t) === 1 && $t[0]['body']['chat_id'] === '-100777', json_encode($t));
+$calls = array();
+$a = make($box, $clock, array_merge($brake, $rich, $tg, $noLine));
+$answer = array('telegram' => array(array(500, '{"ok":false,"description":"down"}')));
+$a->custom('Late urgent', array('x'), SecurityAlerts::URGENT, 'blr');
+$clock += 60; $a->run();
+$t = $via('telegram');
+$u1 = isset($t[0]['body']['reply_markup']['inline_keyboard'][0][0]['url']) ? $t[0]['body']['reply_markup']['inline_keyboard'][0][0]['url'] : '';
+$clock += 30 * 3600; $a->run();
+$t = $via('telegram');
+$last = count($t) > 1 ? $t[count($t) - 1]['body'] : array();
+$u2 = isset($last['reply_markup']['inline_keyboard'][0][0]['url']) ? $last['reply_markup']['inline_keyboard'][0][0]['url'] : '';
+check('Telegram: a delayed URGENT alert says so first (in italics) and its brake button has a fresh link',
+    isset($last['text']) && strpos($last['text'], '<i>⏱ Delayed: this alert is from ') === 0 && preg_match('/t=([0-9]+)\./', $u1, $m1) === 1
+    && preg_match('/t=([0-9]+)\./', $u2, $m2) === 1 && (int) $m2[1] > (int) $m1[1], json_encode($last));
+
+/* Telegram: finding the chat id, plain-word errors */
+$checks = array();
+$a = make($box, $clock, array_merge($rich, $tg, $noLine));
+$answer = array('tg:getUpdates' => array(array(200, json_encode(array('ok' => true, 'result' => array(
+    array('update_id' => 1, 'message' => array('message_id' => 5, 'chat' => array('id' => 111222333, 'type' => 'private', 'first_name' => 'Mei', 'last_name' => 'Lin'), 'text' => '/start')),
+    array('update_id' => 2, 'my_chat_member' => array('chat' => array('id' => -1001234567890, 'type' => 'supergroup', 'title' => 'Shop staff'))),
+    array('update_id' => 3, 'message' => array('message_id' => 9, 'message_thread_id' => 12, 'is_topic_message' => true,
+        'chat' => array('id' => -1001234567890, 'type' => 'supergroup', 'title' => 'Shop staff'),
+        'reply_to_message' => array('message_id' => 12, 'forum_topic_created' => array('name' => 'Alerts')), 'text' => '/start@zz_bot')),
+    array('update_id' => 4, 'channel_post' => array('message_id' => 1, 'chat' => array('id' => -1009876543210, 'type' => 'channel', 'title' => 'Ops'), 'text' => 'hi')),
+))))));
+$tc = $a->telegramChats();
+$ids = array_map(function ($c) { return $c['id'] . ' ' . $c['type'] . ' ' . $c['name']; }, $tc['chats']);
+check('telegramChats(): the people, groups, topics and channels that wrote to the bot, with the id to use (nothing marked as read)',
+    $tc['ok'] && $ids === array('111222333 private Mei Lin', '-1001234567890 supergroup Shop staff', '-1001234567890/12 topic Shop staff › Alerts', '-1009876543210 channel Ops')
+    && count($checks) === 2 && $checks[0]['svc'] === 'tg:getChat' && $checks[1]['svc'] === 'tg:getUpdates' && !isset($checks[1]['body']['offset'])
+    && $tc['moved'] === array(), json_encode($tc) . json_encode($checks));
+$answer = array('tg:getUpdates' => array(array(409, '{"ok":false,"error_code":409,"description":"Conflict: can\'t use getUpdates method while webhook is active; use deleteWebhook to delete the webhook first"}')));
+$tc = $a->telegramChats();
+check('...a bot that has a webhook (409): said in plain words', !$tc['ok'] && strpos($tc['why'], 'this bot has a webhook set') === 0 && $tc['chats'] === array(), json_encode($tc));
+$checks = array();
+$tc = make($box, $clock, array_merge($rich, $tg, $noLine, array('telegram_bot_token' => 'nope')))->telegramChats();
+check('...a token that is not in the BotFather form: not sent anywhere', !$tc['ok'] && strpos($tc['why'], 'BotFather') !== false && $checks === array(), json_encode($tc));
+$calls = array();
+$answer = array('telegram' => array(array(403, '{"ok":false,"error_code":403,"description":"Forbidden: bot was blocked by the user"}')),
+    'discord' => array(array(400, '{"message":"Webhooks posted to forum channels must have a thread_name or thread_id","code":220001}'),
+        array(400, '{"message":"Webhooks posted to forum channels must have a thread_name or thread_id","code":220001}')));
+$each = make($box, $clock, array_merge($rich, $tg, $dc, $noLine))->testEachChannel();
+check('testEachChannel(): what to do, in plain words, for a blocked bot and for a webhook of a forum channel',
+    strpos($each['telegram']['hint'], 'tap Restart') !== false && strpos($each['discord']['hint'], '?thread_id=') !== false && $order() === 'telegram,discord,discord', json_encode($each));
+
+/* Discord: cards */
+$calls = array();
+$a = make($box, $clock, array_merge($brake, $rich, $dc, $noLine, array('site_name' => 'Shop *x* @everyone')));
+$a->loginSucceeded('alice', '192.0.2.10', $office);
+$clock += 60; $a->run();
+$a->loginSucceeded('alice', '203.0.113.50', 'Mozilla/5.0 (X11; Linux x86_64; rv:140.0) Gecko/20100101 Firefox/140.0');
+$a->custom('Card', array('code ``` and __init__.php [x](https://evil.example) <@123>'), SecurityAlerts::URGENT, 'dcc');
+$clock += 60; $r = $a->run();
+$d = $via('discord');
+$c = $d ? $d[0]['body'] : array();
+$e = isset($c['embeds']) ? $c['embeds'] : array();
+check('Discord: one card per finding, red for URGENT, orange for a notice; the facts in a code block shown as written',
+    $r['sent'] === 'discord' && count($e) === 3 && $e[0]['color'] === 0xD92D20 && $e[0]['title'] === '【URGENT】Card'
+    && $e[0]['description'] === "```\ncode `\u{200B}`\u{200B}`\u{200B} and __init__.php [x](https://evil.example) <@123>\n```"
+    && strpos($c['content'], "\n【URGENT】Card\n【Notice】Admin \"alice\" signed in from a new device and network") !== false
+    && $e[1]['color'] === 0xF79009 && strpos($e[1]['title'], '【Notice】Admin "alice" signed in') === 0, json_encode($c));
+check('Discord: the advice in a box of its own; the brake and guide links in a last card (no previews), the header as the message text, mentions never ping',
+    isset($e[1]['fields'][0]) && $e[1]['fields'][0]['name'] === 'What to do' && strpos($e[1]['fields'][0]['value'], 'A staff member on a new phone or travelling?') === 0
+    && preg_match('#^\[🛑 Lock the admin area for 4 hours\]\(https://shop\.example/brake\.php\?t=[0-9]+\.[0-9a-f]{16}\.[0-9a-f]{32}\)\n\[📖 What to do\]\(' . preg_quote($guideEn, '#') . '\)$#u', $e[2]['description']) === 1
+    && $e[2]['color'] === 0xD92D20 && strpos($c['content'], '**🔒 Security alert \| Shop \*x\* @' . "\u{200B}" . 'everyone \(') === 0
+    && strpos($c['content'], 'http') === false && $c['allowed_mentions'] === array('parse' => array()) && $c['flags'] === 0
+    && $d[0]['url'] === $dc['discord_webhook_url'] . '?wait=true' && in_array($dcUa, $d[0]['headers'], true), json_encode($c));
+$calls = array();
+$a = make($box, $clock, array_merge($rich, $noLine, array('discord_webhook_url' => $dc['discord_webhook_url'] . '?thread_id=55')));
+$a->custom('Thread', array('x'), SecurityAlerts::NOTICE, 'dct');
+$clock += 60; $a->run();
+$d = $via('discord');
+check('Discord: a notice is quiet (flag 4096: a badge, no notification); ?thread_id= is kept (a thread or forum post)',
+    $d && $d[0]['url'] === $dc['discord_webhook_url'] . '?thread_id=55&wait=true' && $d[0]['body']['flags'] === 4096, json_encode($d));
+$calls = array();
+$answer = array('discord' => array(array(400, '{"message":"Invalid Form Body","code":50035}')));
+$a = make($box, $clock, array_merge($rich, $dc, $noLine));
+$a->custom('Refused card', array('x'), SecurityAlerts::NOTICE, 'dcf');
+$clock += 60; $r = $a->run();
+$d = $via('discord');
+check('Discord refusing the cards (400): the same alert at once in the plain form (code block, no previews, still quiet)',
+    $r['sent'] === 'discord' && count($d) === 2 && isset($d[0]['body']['embeds']) && !isset($d[1]['body']['embeds'])
+    && strpos($d[1]['body']['content'], "```\n") === 0 && $d[1]['body']['flags'] === (4 | 4096), json_encode($d));
+$calls = array();
+$a = make($box, $clock, array_merge($rich, $dc, $noLine));
+for ($i = 0; $i < 11; $i++) { $a->custom('Many ' . $i, array('x'), SecurityAlerts::NOTICE, 'dcm' . $i); }
+$clock += 60; $r = $a->run();
+$d = $via('discord');
+check('more findings than Discord allows cards (10): the plain form straight away', $r['sent'] === 'discord' && count($d) === 1 && !isset($d[0]['body']['embeds'])
+    && strpos($d[0]['body']['content'], "```\n") === 0, json_encode($d));
+$calls = array();
+$sd = tmpdir('state-gone');
+$answer = array('discord' => array(array(404, '{"message":"Unknown Webhook","code":10015}')));
+$a = make($box, $clock, array_merge($rich, $dc, array('state_dir' => $sd)));   // LINE and e-mail behind it
+$a->custom('Gone 1', array('x'), SecurityAlerts::NOTICE, 'dg1');
+$clock += 60; $r = $a->run();
+check('a webhook that Discord says does not exist (404): LINE takes the alert', $r['sent'] === 'line' && $order() === 'discord,line', $order());
+$calls = array();
+$a->custom('Gone 2', array('x'), SecurityAlerts::NOTICE, 'dg2');
+$clock += 60; $r = $a->run();
+$s = $a->status();
+$hc = $a->checkChannels();
+check('...it is not used again, not even to check it (Discord asks so); status() asks for a new one',
+    $r['sent'] === 'line' && $order() === 'line' && count($s['discord_gone']) === 1 && count(preg_grep('/create a new one and put its address in/', $s['problems'])) === 1
+    && $hc['discord']['code'] === 'webhook_gone' && !array_filter($checks, function ($x) { return $x['svc'] === 'dc:get'; })
+    && strpos(implode('', glob($sd . '/*')) . (string) @file_get_contents($sd . '/discord-gone.json'), 'DC-SECRET') === false, $order() . json_encode($s['problems']));
+$calls = array();
+check('...a test sent by a person tries it once more; it works, so it is used again', $a->sendTest() === 'discord' && $order() === 'discord' && $a->status()['discord_gone'] === array(), $order());
+$answer = array('discord' => array(array(404, '{"message":"Unknown Webhook","code":10015}')));
+$a->custom('Gone 3', array('x'), SecurityAlerts::NOTICE, 'dg3');
+$clock += 60; $a->run();
+$calls = array();
+$b2 = make($box, $clock, array_merge($rich, array('state_dir' => $sd, 'discord_webhook_url' => 'https://discord.example/api/webhooks/2/DC-SECRET-new')));
+$b2->custom('New hook', array('x'), SecurityAlerts::NOTICE, 'dg4');
+$clock += 60; $r = $b2->run();
+check('...a new webhook address is tried at once', $r['sent'] === 'discord' && $order() === 'discord', $order());
+
+/* plain text unchanged */
+$texts = array();
+foreach (array(true, false) as $rm)
+{
+    $clock = strtotime('2026-03-02 10:00:00 UTC');
+    $a = make($box, $clock, array_merge($brake, array('rich_messages' => $rm)));
+    $a->custom('Same words', array('a <b> & *c*', 'b'), SecurityAlerts::URGENT, 'same');
+    $clock += 60; $a->run();
+    $texts[] = isset($box['line'][0]) ? (string) preg_replace('/t=\S+/', 't=X', $box['line'][0]) : '';
+}
+check('LINE and e-mail get the same plain text as in 1.3, rich_messages or not', $texts[0] !== '' && $texts[0] === $texts[1] && strpos($texts[0], "\na <b> & *c*\n") !== false, json_encode($texts));
+
+/* the channels checked without sending (backups) */
+$clock = strtotime('2026-03-02 10:00:00 UTC');
+$a = make($box, $clock, array_merge($rich, $tg, array('telegram_chat_id' => '-100777/12', 'discord_webhook_url' => $dc['discord_webhook_url'] . '?thread_id=55')));
+$a->run();
+$clock = strtotime('2026-03-09 10:00:00 UTC'); $calls = array(); $checks = array(); unset($box['health_gets']);
+$r = $a->run();
+$t = $via('telegram');
+$kinds = array_map(function ($x) { return $x['svc']; }, $checks);
+$tx = $t ? (string) $t[0]['body']['text'] : '';
+check('weekly check-in with backups: each channel is checked without sending (Telegram "typing…" in the topic, the Discord webhook asked about, LINE key and recipient)',
+    $r['heartbeat'] === 'telegram' && $order() === 'telegram' && $kinds === array('tg:getChat', 'tg:sendChatAction', 'dc:get')
+    && $checks[0]['body'] === array('chat_id' => '-100777') && $checks[1]['body'] === array('chat_id' => '-100777', 'action' => 'typing', 'message_thread_id' => 12)
+    && $checks[2]['url'] === $dc['discord_webhook_url'] && in_array($dcUa, $checks[2]['headers'], true) && isset($box['health_gets']) && $box['health_gets'] === 2, json_encode($checks));
+check('...and the check-in says they answer; it arrives quietly',
+    strpos($tx, 'Channels checked without sending a message: Telegram, Discord, LINE OK.') !== false && $t[0]['body']['disable_notification'] === true, $tx);
+$box['line_health'] = 'gone';
+$clock = strtotime('2026-03-16 10:00:00 UTC'); $calls = array(); $checks = array();
+$r = $a->run();
+$t = $via('telegram');
+$tx = $t ? (string) $t[0]['body']['text'] : '';
+$s = $a->status();
+check('a backup that stopped working (a LINE recipient blocked the account): the check-in says which and why (⚠), and so does status()',
+    strpos($tx, '<b>⚠️ Weekly check-in, with something to look at') === 0 && strpos($tx, '⚠ Not working right now: LINE (a recipient blocked the account or is not a friend).') !== false
+    && count(preg_grep('/^LINE does not work \(checked 03\/16 10:00\): a recipient in line_to blocked the account/', $s['problems'])) === 1, $tx . json_encode($s['problems']));
+$clock = strtotime('2026-03-02 10:00:00 UTC');
+$a = make($box, $clock, array_merge($rich, $tg, $noLine));
+$a->run();
+$clock = strtotime('2026-03-09 10:00:00 UTC'); $checks = array();
+$r = $a->run();
+check('only one place to send to: no checks (the check-in arriving is the check)', $r['heartbeat'] === 'telegram' && $checks === array(), json_encode($checks));
+$clock = strtotime('2026-03-02 10:00:00 UTC');
+$a = make($box, $clock, array_merge($rich, array('mail_to' => '', 'line_to' => array('Uowner', 'Ustaff'))));
+$a->run();
+$box['line_health'] = 'gone';
+$clock = strtotime('2026-03-09 10:00:00 UTC'); $calls = array();
+$r = $a->run();
+$l = $via('line');
+check('LINE alone, two recipients: checked too (LINE says "sent" to someone who blocked the account), the check-in warns',
+    $r['heartbeat'] === 'line' && count($l) === 2 && strpos($l[0]['body']['messages'][0]['text'], '⚠ Not working right now: LINE (a recipient blocked the account or is not a friend)') !== false,
+    json_encode($l));
+unset($box['line_health']);
+$a = make($box, $clock, array_merge($rich, $tg, $dc, array('line_to' => array('Uxxxxxxxx', 'Cgroup1'))));
+$checks = array(); unset($box['health_gets']);
+$answer = array('tg:getChat' => array(array(200, '{"ok":true,"result":{"id":-1009876543210,"type":"channel","title":"Ops"}}')));
+$hc = $a->checkChannels();
+check('checkChannels(): a Telegram channel is not sent "typing…" (channels cannot show it) but asked whether the bot may post; LINE asks about a group too; e-mail cannot be checked',
+    array_map(function ($x) { return $x['svc']; }, $checks) === array('tg:getChat', 'tg:getChatMember', 'dc:get') && $box['health_gets'] === 3
+    && $checks[1]['body'] === array('chat_id' => '-100777', 'user_id' => 123456)
+    && $hc['telegram']['ok'] === true && $hc['discord']['ok'] === true && $hc['line']['ok'] === true && $hc['mail'] === array('ok' => null, 'code' => '', 'why' => ''), json_encode($hc) . json_encode($checks));
+$answer = array('tg:getChat' => array(array(200, '{"ok":true,"result":{"id":-1009876543210,"type":"channel","title":"Ops"}}')),
+    'tg:getChatMember' => array(array(200, '{"ok":true,"result":{"status":"administrator","can_post_messages":false}}')));
+$box['quota'] = array(200, 200);
+$hc = $a->checkChannels();
+unset($box['quota']);
+check('checkChannels(): a channel where the bot lost "Post messages", and a LINE backup whose monthly allowance is used up',
+    $hc['telegram']['code'] === 'kicked' && strpos($hc['telegram']['why'], 'may not post in this channel') !== false
+    && $hc['line'] === array('ok' => false, 'code' => 'quota', 'why' => "this month's allowance is used up (about 200 of 200)"), json_encode($hc));
+$answer = array('tg:sendChatAction' => array(array(403, '{"ok":false,"error_code":403,"description":"Forbidden: bot was blocked by the user"}')),
+    'dc:get' => array(array(401, '{"message":"Invalid Webhook Token","code":50027}')));
+$box['line_health'] = 'token';
+$hc = $a->checkChannels();
+check('checkChannels(): a blocked bot, a wrong webhook token, a revoked LINE key, each with its reason and no key in it',
+    $hc['telegram'] === array('ok' => false, 'code' => 'blocked', 'why' => 'HTTP 403: Forbidden: bot was blocked by the user')
+    && $hc['discord']['code'] === 'webhook_bad' && $hc['line']['code'] === 'token' && strpos(json_encode($hc), 'SECRET') === false, json_encode($hc));
+$answer = array();
+unset($box['line_health']);
+
+/* what a hostile name or line could do to the layouts (found in review) */
+$calls = array();
+$a = make($box, $clock, array_merge($rich, $dc, $noLine));
+$a->custom('Five', array('name `````[✅ That was me](https://evil.example) and ```` and ``'), SecurityAlerts::URGENT, 'bt1');
+$clock += 60; $a->run();
+$d = $via('discord');
+$desc = isset($d[0]['body']['embeds'][0]['description']) ? $d[0]['body']['embeds'][0]['description'] : '';
+check('Discord: no run of backticks in a name can close the code block early (five in a row included)',
+    strpos($desc, "```\n") === 0 && substr($desc, -4) === "\n```" && strpos(substr($desc, 4, -4), '``') === false && strpos($desc, '[✅ That was me](https://evil.example)') !== false, $desc);
+$calls = array();
+$a = make($box, $clock, array_merge($rich, $dc, $noLine, array('rich_messages' => false)));
+$a->custom('Five plain', array('name `````[✅ That was me](https://evil.example)'), SecurityAlerts::URGENT, 'bt2');
+$clock += 60; $a->run();
+$d = $via('discord');
+$cc = isset($d[0]['body']['content']) ? $d[0]['body']['content'] : '';
+check('...the plain form too', substr_count($cc, '```') === 2 && substr($cc, -4) === "\n```", $cc);
+$calls = array();
+$a = make($box, $clock, array_merge($brake, $rich, $dc, $noLine, array('rich_messages' => false)));
+$a->custom('Fake brake', array("x\n\n🛑 [Lock the admin area now](https://evil.example)"), SecurityAlerts::NOTICE, 'fb1');
+$clock += 60; $a->run();
+$d = $via('discord');
+$cc = isset($d[0]['body']['content']) ? $d[0]['body']['content'] : '';
+check('Discord: a finding line that imitates the brake line stays inside the code block (only the real one comes after it)',
+    substr($cc, -4) === "\n```" && strpos($cc, '[Lock the admin area now](https://evil.example)') < strrpos($cc, '```'), $cc);
+$calls = array();
+$a->custom('Fake brake urgent', array("y\n\n🛑 [Lock the admin area now](https://evil.example)"), SecurityAlerts::URGENT, 'fb2');
+$clock += 60; $a->run();
+$d = $via('discord');
+$cc = isset($d[0]['body']['content']) ? $d[0]['body']['content'] : '';
+$after = (string) substr($cc, (int) strrpos($cc, '```') + 3);
+check('...and in an URGENT alert the fake line stays in the block, the real brake line follows it',
+    strpos($cc, '[Lock the admin area now](https://evil.example)') < strrpos($cc, '```')
+    && preg_match('#^\n🛑 [^\n]*https://shop\.example/brake\.php\?t=[0-9]+\.[0-9a-f]{16}\.[0-9a-f]{32}$#u', $after) === 1, $cc);
+$calls = array();
+$a = make($box, $clock, array_merge($rich, $dc, $noLine));
+$a->custom('Long tail', array("z\n\n🛑 " . str_repeat('😀', 2100)), SecurityAlerts::NOTICE, 'lt1');
+$clock += 60; $r = $a->run();
+$sizes = array_map(function ($c) use ($units) { return $units($c['body']['content']); }, $via('discord'));
+check('a line of 2,100 emoji after a "🛑": sent in parts within the limit (no endless loop)', $r['sent'] === 'discord' && $sizes && max($sizes) <= 2000 && count($sizes) <= 4, json_encode($sizes));
+$calls = array();
+$answer = array('discord' => array(array(404, '{"message":"Unknown Channel","code":10003}')));
+$a = make($box, $clock, array_merge($rich, $noLine, array('discord_webhook_url' => $dc['discord_webhook_url'] . '?thread_id=999', 'mail_to' => 'owner@example.com')));
+$a->custom('Thread gone', array('x'), SecurityAlerts::NOTICE, 'tg404');
+$clock += 60; $r = $a->run();
+$s = $a->status();
+check('Discord 404 for the thread in ?thread_id= (code 10003): said as such, not "create a new webhook"', $r['sent'] === 'mail'
+    && count(preg_grep('/thread named by \?thread_id= .* does not exist/', $s['problems'])) === 1 && !preg_grep('/create a new one/', $s['problems']), json_encode($s['problems']));
+
+$clock = strtotime('2026-03-02 10:00:00 UTC');
+$a = make($box, $clock, array_merge($rich, $tg, $dc, $noLine));
+$a->run();
+$answer = array('telegram' => array_fill(0, 6, array(500, '{"ok":false,"description":"down"}')), 'discord' => array_fill(0, 6, array(500, '{"message":"down"}')));
+$clock = strtotime('2026-03-09 10:00:00 UTC'); $checks = array();
+$r1 = $a->run();
+$n1 = count($checks);
+$clock += 300; $checks = array();
+$r2 = $a->run();
+$answer = array();
+check('a check-in that could not go out is tried again next run, without asking every channel again', $r1['heartbeat'] === 'failed' && $r2['heartbeat'] === 'failed'
+    && $n1 > 0 && $checks === array(), $n1 . ' ' . json_encode($checks));
+
+$warn = array();
+set_error_handler(function ($no, $str) use (&$warn) { $warn[] = $str; return true; });
+$sdw = tmpdir('state-odd');
+file_put_contents($sdw . '/channels.json', '{"channels":{"telegram":{"ok":false,"code":["x"],"why":{"a":1},"moved":"2"}}}');
+$a = make($box, $clock, array_merge($rich, $tg, $noLine, array('state_dir' => $sdw, 'guide_url' => array('x'))));
+$s = $a->status();
+$a->custom('odd', array('x'), SecurityAlerts::NOTICE, 'odd1');
+$answer = array('telegram' => array(array(400, '{"ok":false,"description":"Bad Request: group chat was upgraded to a supergroup chat","parameters":{"migrate_to_chat_id":{"x":1}}}')),
+    'tg:getUpdates' => array(array(200, '{"ok":true,"result":[{"update_id":1,"message":{"chat":{"id":5,"type":["p"],"title":{"t":1},"username":["u"]}}},"junk",{"update_id":2,"message":{"chat":"x"}}]}')));
+$clock += 60; $a->run();
+$tc = $a->telegramChats();
+restore_error_handler();
+$answer = array();
+check('odd answers and odd records give no PHP warning (a non-text title, a malformed migrate answer, a broken channels.json, guide_url not a string)',
+    $warn === array() && $s['telegram_moved'] === 2 && $tc['ok'] && count($tc['chats']) === 1, json_encode($warn));
 
 /* ------------------------------------------------------------------ */
 echo "Daily cap, urgent bypass, fallback\n";

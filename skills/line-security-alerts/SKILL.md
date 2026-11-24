@@ -28,8 +28,8 @@ Read these when you need them:
 - [reference/when-an-alert-arrives.md](reference/when-an-alert-arrives.md) / [繁體中文](reference/when-an-alert-arrives.zh-TW.md) / [日本語](reference/when-an-alert-arrives.ja.md) — the owner's checklist: what each message means and what to do first
 - [reference/hardening-checklist.md](reference/hardening-checklist.md) / [繁體中文](reference/hardening-checklist.zh-TW.md) / [日本語](reference/hardening-checklist.ja.md) — the prevention side: what makes a break-in less likely in the first place
 - [reference/line-setup.md](reference/line-setup.md) — getting a channel access token and the user/group ID
-- [examples/](examples/) — a config template, the cron entry point (`--status`, `--test`, `--test-all`, `--audit`, `--pages`, `--expect 30m` / `--expect off`, `--lock` / `--unlock`, `--fingerprint`, `--manifest`, `--rebaseline`) and the optional emergency-brake page (`security-brake.php`)
-- `scripts/selftest.php` — 261 checks, no network; `scripts/fake_line_server.php` — a local stand-in for LINE, Telegram, Discord, the check-in service, a webhook, and a small shop that can be switched to "hacked" (`/shop/hack`) for trying the page watch
+- [examples/](examples/) — a config template, the cron entry point (`--status`, `--test`, `--test-all`, `--telegram-chats`, `--audit`, `--pages`, `--expect 30m` / `--expect off`, `--lock` / `--unlock`, `--fingerprint`, `--manifest`, `--rebaseline`) and the optional emergency-brake page (`security-brake.php`)
+- `scripts/selftest.php` — 311 checks, no network; `scripts/fake_line_server.php` — a local stand-in for LINE, Telegram, Discord, the check-in service, a webhook, and a small shop that can be switched to "hacked" (`/shop/hack`) for trying the page watch
 - `scripts/fingerprint.php` — the code fingerprint of any folder, to compare a clean local copy with the one the server reports
 - `scripts/demo.php` — replays a few days at a small shop and prints the exact messages the owner
   would get (`--lang=zh-TW`, `--site="Their shop"`). Run it and show the output when the user asks
@@ -63,7 +63,12 @@ Find and note, with file paths:
 9. **Channel**: LINE, Telegram, Discord, or several? Show the user the comparison in the README
    (cost, setup, whether they will see it at once, what a leaked key allows). For a Taiwanese shop
    owner LINE is usually the one they see first; Telegram or Discord can carry the routine messages
-   with `line_min_level => 2`. Let them create the bot or webhook themselves.
+   with `line_min_level => 2`. Let them create the bot or webhook themselves. For the Telegram chat
+   id, have them press Start (or add the bot to the group) and run `--telegram-chats` themselves — do
+   not ask them to open a `getUpdates` address in a browser (it holds the token). Several sites in one
+   group: a Telegram topic each (`-100…/12`) or a Discord thread each (`?thread_id=`).
+   Tell them that by default only URGENT alerts ring and the rest arrive quietly (`ring_level`); ask
+   whether that suits them rather than changing it on your own.
    **For LINE, ask which official account they mean to use.** If it is the one their customers follow
    (it already has a token because the site sends order messages, say), explain why alerts need an
    account of their own: the token lives on the server, and whoever breaks in could message every
@@ -154,7 +159,9 @@ Preferred: cron every 5 minutes running `examples/security-alerts-cron.php` (adj
    Stop the fake server afterwards (by its PID).
 3. Remove `line_api_base` (and the fake Telegram / Discord addresses), put the real keys in, run
    `--test-all` once and ask the user to confirm that every channel arrived on their phone. A failing
-   channel prints the service's reason (e.g. "HTTP 400: Bad Request: chat not found").
+   channel prints the service's reason (e.g. "HTTP 400: Bad Request: chat not found") and, on the next
+   line, what to do about it. On Telegram and Discord the test should look like the alerts will (bold
+   titles and buttons / a coloured card); test messages always ring.
 4. Run the cron script once more: the first real run records the baseline and must send nothing.
 5. **Look at what was already there.** The baseline trusts the server as it is; a backdoor planted
    before the install would become "normal". Run `php security-alerts-cron.php --audit` and go
@@ -176,8 +183,9 @@ Preferred: cron every 5 minutes running `examples/security-alerts-cron.php` (adj
 8. `php security-alerts-cron.php --status` must end with "nothing needs a look" (or only with lines
    you have explained to the user, such as a missing fallback e-mail). Use the same command first
    whenever the user later asks whether the alerts still work; it never prints a token, a recipient
-   or chat id, a webhook or the check-in address. It shows the order the channels are tried in and
-   roughly how many friends the LINE account has (`!!` above 20: see step 1.9).
+   or chat id, a webhook or the check-in address. It shows the order the channels are tried in,
+   whether each channel answers (checked without sending; Telegram shows "typing…" for a moment), who
+   rings, and roughly how many friends the LINE account has (`!!` above 20: see step 1.9).
 
 ### 6. Hand-over to the user
 
@@ -216,6 +224,13 @@ Tell the user, in their language:
   password protection or touch DNS on your own: describe the step and let them decide;
 - that the weekly message also says how much of the month's LINE allowance is used, and that a ⚠ on
   that line means: raise the LINE plan or make sure the fallback e-mail is set;
+- that only URGENT alerts ring; notices and the weekly check-in arrive quietly in the chat
+  (`ring_level`), so they should glance at the chat now and then. With more than one place to send to,
+  the check-in also says whether each channel still works; a ⚠ there means a backup is broken (a
+  blocked bot, a deleted webhook, a colleague who blocked the LINE account) and should be fixed that
+  week;
+- on Telegram, the "🛑" button under an URGENT alert is the emergency brake and "📖 What to do" opens the
+  checklist; on Discord both are links in the last card;
 - that thresholds are starting points to tune after a week of real traffic.
 
 ## Rules for you (the agent)
