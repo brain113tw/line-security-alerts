@@ -299,7 +299,7 @@ send one real test message.
 **To install a fixed, reviewed version** (advisable for a security tool), add the release tag:
 
 ```
-/plugin marketplace add brain113tw/line-security-alerts#v1.4.0
+/plugin marketplace add brain113tw/line-security-alerts#v1.5.0
 /plugin install line-security-alerts@line-security-tools
 ```
 
@@ -488,7 +488,7 @@ is at the end of the config template.
 | `rich_messages` | on | Bold titles and buttons on Telegram, coloured cards on Discord; off = plain text everywhere, as before |
 | `guide_url` | `auto` | Where the "What to do" button points: `auto` = this package's guide on GitHub (in your language); empty = no button; or your own copy |
 | `mail_to` | | E-mail, when every other channel fails |
-| `language` | `en` | `en` or `zh-TW` |
+| `language` | `en` | `en`, `zh-TW` or `ja` (Japanese) |
 | `site_root`, `exclude_dirs`, `upload_dirs`, `runtime_dirs` | | File-scan scope; exclude cache folders |
 | `scan_hours` | 1 | Hours between file checks; 0 = on every run (every 5 minutes). Only files whose size or times changed are re-read |
 | `rehash_days` | 7 | Days between full re-reads of every file (0 = never) |
@@ -520,7 +520,7 @@ The full list is `SecurityAlerts::defaults()`. Thresholds are starting points â€
 php skills/line-security-alerts/scripts/selftest.php
 ```
 
-311 scenario checks (logins, devices, accounts, firewall, money, files, web-shell patterns, weekly
+315 scenario checks (logins, devices, accounts, firewall, money, files, web-shell patterns, weekly
 check-in and fingerprint, wiped or edited records, upgrading old fingerprints, outside check-in,
 quarantine, timestamps put back, delayed delivery, non-UTF-8 names, daily cap, e-mail fallback,
 Telegram / Discord order, long messages in parts, "too many requests", update windows, LINE friend

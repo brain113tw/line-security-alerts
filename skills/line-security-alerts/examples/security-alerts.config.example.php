@@ -8,7 +8,7 @@
 
 return array(
     'site_name' => 'My Shop',
-    'language'  => 'en',                     // 'en' or 'zh-TW'
+    'language'  => 'en',                     // 'en', 'zh-TW' or 'ja'
     'timezone'  => 'Asia/Taipei',
 
     /* Where the module keeps its logs and fingerprints. Must be writable by PHP AND by the cron user.

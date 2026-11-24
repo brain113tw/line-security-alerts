@@ -259,7 +259,7 @@ Claude 會先找出你網站的登入、帳號管理、上傳資料夾等位置�
 **想裝固定、看過的版本**（資安工具建議這樣裝）：在網址後面加上版本標籤。
 
 ```
-/plugin marketplace add brain113tw/line-security-alerts#v1.4.0
+/plugin marketplace add brain113tw/line-security-alerts#v1.5.0
 /plugin install line-security-alerts@line-security-tools
 ```
 
@@ -430,7 +430,7 @@ Discord 每個網站用自己的討論串（`?thread_id=`）或自己的 Webhook
 | `rich_messages` | 開啟 | Telegram 用粗體和按鈕、Discord 用彩色卡片；關掉＝跟以前一樣全部純文字 |
 | `guide_url` | `auto` | 「收到通知怎麼辦」按鈕連到哪：`auto`＝本套件在 GitHub 上的說明（依語言）；空白＝不放；或填你自己的網址 |
 | `mail_to` | | 所有管道都失敗時的備援 Email |
-| `language` | `en` | `en` 或 `zh-TW` |
+| `language` | `en` | `en`、`zh-TW` 或 `ja`（日文） |
 | `site_root`、`exclude_dirs`、`upload_dirs`、`runtime_dirs` | | 檔案掃描範圍；快取資料夾記得排除 |
 | `scan_hours` | 1 | 每幾小時比對一次檔案；設 0＝每次排程都比對（每 5 分鐘），只會重讀大小或時間有變的檔 |
 | `rehash_days` | 7 | 每幾天把全部檔案完整重讀一次（0＝不做） |
@@ -462,7 +462,7 @@ Discord 每個網站用自己的討論串（`?thread_id=`）或自己的 Webhook
 php skills/line-security-alerts/scripts/selftest.php
 ```
 
-311 項情境測試（登入、裝置、帳號、防火牆、金額、檔案、後門樣式、每週報平安與總指紋、紀錄被清空或被改、
+315 項情境測試（登入、裝置、帳號、防火牆、金額、檔案、後門樣式、每週報平安與總指紋、紀錄被清空或被改、
 舊版指紋升級、外部報到、自動隔離、時間被調回去、補發、非 UTF-8 檔名、每日上限、Email 備援、
 Telegram／Discord 的發送順序、太長分段、請求太多要等、預告時段、LINE 好友數、
 網頁監看的四種讀法與只給爬蟲看的連結、緊急煞車、只有緊急的會響、Telegram 排版與按鈕、Discord 卡片、

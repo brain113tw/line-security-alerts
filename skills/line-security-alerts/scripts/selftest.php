@@ -299,9 +299,9 @@ foreach (array('lib/SecurityAlerts.php', 'scripts/selftest.php', 'scripts/demo.p
     }
     check("$own does not trip the module's own rules", $hits === array(), implode(',', $hits));
 }
-/* Owners read the message, not the rule id: every rule needs wording in both languages. */
+/* Owners read the message, not the rule id: every rule needs wording in every language. */
 $missing = array();
-foreach (array('en', 'zh-TW') as $lang)
+foreach (array('en', 'zh-TW', 'ja') as $lang)
 {
     $probe = make($pbox, $clock, array('language' => $lang));
     foreach (array_merge(array_keys($rules), array('imgphp')) as $id)
@@ -310,7 +310,23 @@ foreach (array('en', 'zh-TW') as $lang)
         if ($label === 'sus_' . $id || $label === '') { $missing[] = "$lang:$id"; }
     }
 }
-check('every rule has a plain-language label in both languages', $missing === array(), implode(' ', $missing));
+check('every rule has a plain-language label in every language', $missing === array(), implode(' ', $missing));
+/* every message in every language, with the same printf placeholders as the English one (a missing %s throws in vsprintf) */
+$S = (new ReflectionMethod('SecurityAlerts', 't'))->getStaticVariables();
+$S = isset($S['s']) ? $S['s'] : array();
+$ph = function ($s) { preg_match_all('/%(\d+\$)?[-+ 0#]*\d*(\.\d+)?[sdfxXbcoeEgGu%]/', (string) $s, $m); return $m[0]; };
+$bad = array();
+foreach (array('zh-TW', 'ja') as $lang)
+{
+    if (!isset($S[$lang], $S['en'])) { $bad[] = $lang . ':missing'; continue; }
+    foreach (array_diff(array_keys($S['en']), array_keys($S[$lang])) as $k) { $bad[] = "$lang:-$k"; }
+    foreach (array_diff(array_keys($S[$lang]), array_keys($S['en'])) as $k) { $bad[] = "$lang:+$k"; }
+    foreach ($S['en'] as $k => $v)
+    {
+        if (isset($S[$lang][$k]) && $ph($S[$lang][$k]) !== $ph($v)) { $bad[] = "$lang:%$k"; }
+    }
+}
+check('every message exists in English, Chinese and Japanese, with the same placeholders', count($S) === 3 && $bad === array(), implode(' ', $bad));
 
 /* ------------------------------------------------------------------ */
 echo "Demo script\n";
@@ -2263,6 +2279,32 @@ check('checkChannels(): a blocked bot, a wrong webhook token, a revoked LINE key
     && $hc['discord']['code'] === 'webhook_bad' && $hc['line']['code'] === 'token' && strpos(json_encode($hc), 'SECRET') === false, json_encode($hc));
 $answer = array();
 unset($box['line_health']);
+
+/* Japanese (1.5) */
+$calls = array();
+$a = make($box, $clock, array_merge($brake, $rich, $tg, $noLine, array('language' => 'ja', 'site_name' => 'テスト店')));
+$a->custom('テストの緊急', array('x'), SecurityAlerts::URGENT, 'ja1');
+$clock += 60; $a->run();
+$b = $first('telegram');
+$rows = isset($b['reply_markup']['inline_keyboard']) ? $b['reply_markup']['inline_keyboard'] : array();
+check('language ja: the Telegram alert in Japanese, brake and guide buttons, the guide in Japanese',
+    isset($b['text']) && strpos($b['text'], '<b>🔒 セキュリティ通知｜テスト店（') === 0 && strpos($b['text'], '<b>【緊急】テストの緊急</b>') !== false
+    && count($rows) === 2 && $rows[0][0]['text'] === '🛑 管理画面を 4 時間ロック'
+    && $rows[1][0] === array('text' => '📖 通知が届いたら', 'url' => str_replace('.md', '.ja.md', $guideEn)), json_encode($b));
+$calls = array();
+$a = make($box, $clock, array_merge($brake, $rich, $dc, $noLine, array('language' => 'ja', 'rich_messages' => false)));
+$a->custom('テストの緊急', array('x'), SecurityAlerts::URGENT, 'ja2');
+$clock += 60; $a->run();
+$d = $via('discord');
+$cc = $d ? (string) $d[0]['body']['content'] : '';
+$after = (string) substr($cc, (int) strrpos($cc, '```') + 3);
+check('...the Japanese brake line is recognised as the brake line: on Discord it comes after the code block',
+    preg_match('#^\n🛑 自分たちがしたことではなく[^\n]*https://shop\.example/brake\.php\?t=\S+$#u', $after) === 1, $cc);
+$a = make($box, $clock, array_merge($brake, array('language' => 'ja')));
+preg_match('/[?&]t=(\S+)$/', $a->brakeLink(), $tk);
+$g = $a->brakeRequest('GET', isset($tk[1]) ? $tk[1] : '', '198.51.100.7');
+check('...and the brake page itself is in Japanese', $g['status'] === 200 && strpos($g['html'], '<html lang="ja"') !== false
+    && strpos($g['html'], '管理画面を 4 時間ロックする') !== false, substr($g['html'], 0, 300));
 
 /* what a hostile name or line could do to the layouts (found in review) */
 $calls = array();

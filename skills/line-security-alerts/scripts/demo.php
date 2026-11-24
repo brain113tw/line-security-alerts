@@ -5,6 +5,7 @@
  *
  *   php scripts/demo.php                     English
  *   php scripts/demo.php --lang=zh-TW        中文
+ *   php scripts/demo.php --lang=ja           日本語
  *   php scripts/demo.php --site="My Shop"    use your own shop name in the messages
  *   php scripts/demo.php --json              machine-readable (used to draw the picture in the README)
  *
@@ -30,13 +31,29 @@ foreach (array_slice($argv, 1) as $arg)
     elseif (strpos($arg, '--lang=') === 0) { $opt['lang'] = substr($arg, 7); }
     elseif (strpos($arg, '--site=') === 0) { $opt['site'] = substr($arg, 7); }
 }
-$zh = ($opt['lang'] === 'zh-TW');
+$lang = in_array($opt['lang'], array('en', 'zh-TW', 'ja'), true) ? $opt['lang'] : 'en';
+$zh = ($lang === 'zh-TW');
 if ($opt['site'] === '')
 {
-    $opt['site'] = $zh ? '我的商店' : 'My Shop';
+    $opt['site'] = $zh ? '我的商店' : ($lang === 'ja' ? 'マイショップ' : 'My Shop');
 }
 
-$say = $zh ? array(
+$say = $lang === 'ja' ? array(
+    'install'   => 'インストールしました。最初の実行では、いまのサイトの状態を記録するだけです。',
+    'none'      => '（メッセージは送られません）',
+    'deploy1'   => '更新をアップロードしました：プログラムを 2 つ追加、1 つ変更。',
+    'scan'      => '次の定期チェック。スマホに届くのは：',
+    'mine'      => '自分たちのアップロードなので、気にしなくて大丈夫です。大事なのは、その日に何もアップロードしていないのにこれが届いたら、誰かがサイトを書き換えたということです。',
+    'deploy2'   => 'ライブラリを 1 つ更新しました。',
+    'mine2'     => 'これも自分たちです。アップロードのたびに 1 通届くので、そのまま「更新の記録」になります。',
+    'intruder'  => '深夜。誰も置いていないファイルがアップロード用フォルダに現れ、同時に誰かが管理画面のパスワードを当てようとしています。',
+    'urgent'    => '今回は自分たちではありません。メッセージは「緊急」になり、最初に何をすればいいかも書いてあります。',
+    'quiet'     => 'インストールしてちょうど 1 週間の朝。何もないときは完全に静かなので、週に 1 回「まだ動いています」と知らせます：',
+    'beat'      => 'これが届かない週があれば、チェックが止まっています（スケジュールの故障、トークンの期限切れ、サーバーの入れ替えなど）。',
+    'quiet2'    => 'さらに 1 週間。この週は誰もプログラムに手を触れていません。',
+    'same'      => '「コード指紋」が前回と同じなので、この 1 週間プログラムは変わっていません。この文字列はあなたの LINE に残るので、サーバーに入り込んだ人にも書き換えられません。「プログラムが変わった」という通知がないのに指紋が変わったら、メッセージが警告します。',
+    'end'       => 'デモはここまでです。上のメッセージはすべて、このモジュールが実際に作った文面です。',
+) : ($zh ? array(
     'install'   => '裝好了。第一次執行只把網站現在的樣子記下來。',
     'none'      => '（沒有發任何訊息）',
     'deploy1'   => '你上傳了一次更新：新增 2 支程式、改了 1 支。',
@@ -66,7 +83,7 @@ $say = $zh ? array(
     'quiet2'    => 'One more week. Nobody touched the code this week.',
     'same'      => 'The "code fingerprint" equals the one in the previous message: no code changed this week. It sits in your LINE chat, where someone who got into the server cannot edit it; if it ever changes without a "code files changed" notice in between, the message warns you.',
     'end'       => 'End of the demo. Every message above is the module\'s real output.',
-);
+));
 
 /* ---------------------------------------------------------------- the pretend website */
 $tmp = rtrim(str_replace('\\', '/', sys_get_temp_dir()), '/') . '/lsa-demo-' . getmypid() . '-' . mt_rand(1000, 9999);
@@ -89,7 +106,7 @@ $clock = 0;
 $sent = array();
 $alerts = new SecurityAlerts(array(
     'site_name'  => $opt['site'],
-    'language'   => $zh ? 'zh-TW' : 'en',
+    'language'   => $lang,
     'timezone'   => 'Asia/Taipei',
     'state_dir'  => $tmp . '/state',
     'site_root'  => $site,

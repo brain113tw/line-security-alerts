@@ -45,8 +45,8 @@ The latest release. Please update before reporting.
 
 ## Checking what you installed
 
-- Releases are git tags (`v1.4.0`…). Install a tag rather than the default branch:
-  `/plugin marketplace add brain113tw/line-security-alerts#v1.4.0`.
+- Releases are git tags (`v1.5.0`…). Install a tag rather than the default branch:
+  `/plugin marketplace add brain113tw/line-security-alerts#v1.5.0`.
 - From 1.3.0 on, each release on the Releases page lists the SHA-256 of `lib/SecurityAlerts.php`.
   Compare it with your copy (`sha256sum lib/SecurityAlerts.php`).
 - The automated tests pin every GitHub Action to a full commit and run with read-only permissions.
@@ -68,5 +68,5 @@ The latest release. Please update before reporting.
 
 README 裡講明的限制不算漏洞：跟網站有同樣檔案權限的人，可以改掉偵測本身；每週總指紋和外部報到是讓這件事「看得出來」，不是讓它「做不到」。
 
-**確認裝到的是哪一版**：請安裝版本標籤（`/plugin marketplace add brain113tw/line-security-alerts#v1.4.0`），不要直接裝最新的主分支。
+**確認裝到的是哪一版**：請安裝版本標籤（`/plugin marketplace add brain113tw/line-security-alerts#v1.5.0`），不要直接裝最新的主分支。
 從 1.3.0 起，Releases 頁每一版都附上 `lib/SecurityAlerts.php` 的 SHA-256，可以跟你手上的檔案比對。

@@ -1,5 +1,18 @@
 # Changelog / 更新紀錄
 
+## 1.5.0 — 2026-11-24
+
+- **Alerts in Japanese**: `'language' => 'ja'`. Every message, the Telegram buttons ("📖 通知が届いたら",
+  "🛑 管理画面を N 時間ロック"), the emergency-brake page, and the "what to do" guide the button opens
+  (`when-an-alert-arrives.ja.md`). The wording follows the Japanese README and guide, whose examples and
+  headings now show the Japanese alerts (English titles in brackets). `demo.php --lang=ja`.
+  通知可以用日文（`language` 設 `ja`）。
+  日本語の通知に対応しました（`language` を `ja` に）。
+- The self-test checks that every message exists in English, Chinese and Japanese with the same
+  placeholders. On an admin account change, the list of what changed uses the language's own separator
+  (`、` in Chinese and Japanese).
+- Self-test: 315 checks.
+
 ## 1.4.0 — 2026-11-24
 
 - **Only URGENT alerts ring** (`ring_level`, default 2). Notices and the weekly check-in still arrive,

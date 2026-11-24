@@ -29,10 +29,10 @@ Read these when you need them:
 - [reference/hardening-checklist.md](reference/hardening-checklist.md) / [繁體中文](reference/hardening-checklist.zh-TW.md) / [日本語](reference/hardening-checklist.ja.md) — the prevention side: what makes a break-in less likely in the first place
 - [reference/line-setup.md](reference/line-setup.md) — getting a channel access token and the user/group ID
 - [examples/](examples/) — a config template, the cron entry point (`--status`, `--test`, `--test-all`, `--telegram-chats`, `--audit`, `--pages`, `--expect 30m` / `--expect off`, `--lock` / `--unlock`, `--fingerprint`, `--manifest`, `--rebaseline`) and the optional emergency-brake page (`security-brake.php`)
-- `scripts/selftest.php` — 311 checks, no network; `scripts/fake_line_server.php` — a local stand-in for LINE, Telegram, Discord, the check-in service, a webhook, and a small shop that can be switched to "hacked" (`/shop/hack`) for trying the page watch
+- `scripts/selftest.php` — 315 checks, no network; `scripts/fake_line_server.php` — a local stand-in for LINE, Telegram, Discord, the check-in service, a webhook, and a small shop that can be switched to "hacked" (`/shop/hack`) for trying the page watch
 - `scripts/fingerprint.php` — the code fingerprint of any folder, to compare a clean local copy with the one the server reports
 - `scripts/demo.php` — replays a few days at a small shop and prints the exact messages the owner
-  would get (`--lang=zh-TW`, `--site="Their shop"`). Run it and show the output when the user asks
+  would get (`--lang=zh-TW` or `--lang=ja`, `--site="Their shop"`). Run it and show the output when the user asks
   "what will I actually receive?" — before installing anything. It writes only harmless files to a
   temp folder and sends nothing.
 
@@ -193,8 +193,8 @@ Tell the user, in their language:
 
 - what each kind of message means and the first thing to do: give them the checklist in their
   language ([English](reference/when-an-alert-arrives.md), [繁體中文](reference/when-an-alert-arrives.zh-TW.md),
-  [日本語](reference/when-an-alert-arrives.ja.md); README.ja.md for a Japanese-speaking owner — the alert texts
-  themselves are English or Traditional Chinese, so say which `language` you chose)
+  [日本語](reference/when-an-alert-arrives.ja.md); README.ja.md for a Japanese-speaking owner; set `language`
+  to match: `en`, `zh-TW` or `ja`)
   and ask them to keep it on their phone, not only on the server;
 - that after their own deployments they will get a "code files changed" notice — expected. Better:
   run `--expect 30m` before uploading (and `--expect off` when done): the changes then come as one

@@ -48,7 +48,7 @@ final class SecurityAlerts
     const NOTICE = 1;   // worth a message
     const URGENT = 2;   // send even if the daily cap is reached
     const BRAKE_MARK = "\u{1F6D1} ";   // starts the emergency-brake line at the end of an URGENT message
-    const VERSION = '1.4.0';
+    const VERSION = '1.5.0';
 
     /** @var array */
     private $cfg;
@@ -72,7 +72,7 @@ final class SecurityAlerts
         return array(
             'enabled'            => true,
             'site_name'          => 'Website',
-            'language'           => 'en',          // 'en' or 'zh-TW'
+            'language'           => 'en',          // 'en', 'zh-TW' or 'ja'
             'state_dir'          => '',            // REQUIRED. Writable, ideally outside the web root.
             'timezone'           => '',            // e.g. 'Asia/Taipei'; '' = PHP default
             /* Old sites sometimes have file or account names that are not UTF-8 (a folder made by an FTP client in
@@ -846,7 +846,7 @@ final class SecurityAlerts
         $method = strtoupper((string) $method);
         $site = htmlspecialchars((string) $this->cfg['site_name'], ENT_QUOTES, 'UTF-8');
         $page = function ($status, $body, $locked = false) use ($site) {
-            $html = '<!doctype html><html lang="' . ($this->cfg['language'] === 'zh-TW' ? 'zh-Hant-TW' : 'en') . '"><head><meta charset="utf-8">'
+            $html = '<!doctype html><html lang="' . ($this->cfg['language'] === 'zh-TW' ? 'zh-Hant-TW' : ($this->cfg['language'] === 'ja' ? 'ja' : 'en')) . '"><head><meta charset="utf-8">'
                 . '<meta name="viewport" content="width=device-width, initial-scale=1"><meta name="robots" content="noindex">'
                 . '<title>' . htmlspecialchars($this->t('brake_title'), ENT_QUOTES, 'UTF-8') . '</title>'
                 . '<style>body{font:1.125rem/1.6 system-ui,sans-serif;max-width:34rem;margin:2rem auto;padding:0 1rem}'
@@ -1536,7 +1536,7 @@ final class SecurityAlerts
                     {
                         $lvl = ($diff['role'] || $diff['perms'] || (!empty($o['2fa']) && empty($r['2fa']))) ? self::URGENT : self::NOTICE;
                         $out[] = $this->finding('account', 'snap:chg:' . $name . ':' . md5((string) $this->json($r)), $lvl, $this->t('acct_title'),
-                            array($this->t('snap_changed', $name, implode(', ', $changes))));
+                            array($this->t('snap_changed', $name, implode($this->t('name_sep'), $changes))));
                     }
                 }
                 foreach ($was as $name => $r)
@@ -2616,7 +2616,7 @@ final class SecurityAlerts
     private function pageViews()
     {
         $base = array('Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-            'Accept-Language: ' . ($this->cfg['language'] === 'zh-TW' ? 'zh-TW,zh;q=0.9,en;q=0.8' : 'en;q=0.9,*;q=0.5'));
+            'Accept-Language: ' . ($this->cfg['language'] === 'zh-TW' ? 'zh-TW,zh;q=0.9,en;q=0.8' : ($this->cfg['language'] === 'ja' ? 'ja,en;q=0.8' : 'en;q=0.9,*;q=0.5')));
         $desktop = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
         $phone = 'Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36';
         /* the form Google gives for its smartphone crawler; injected spam looks for "Googlebot" in it */
@@ -3616,7 +3616,7 @@ final class SecurityAlerts
         if ($g === 'auto')
         {
             return 'https://github.com/brain113tw/line-security-alerts/blob/main/skills/line-security-alerts/reference/when-an-alert-arrives'
-                . ($this->cfg['language'] === 'zh-TW' ? '.zh-TW' : '') . '.md';
+                . ($this->cfg['language'] === 'zh-TW' ? '.zh-TW' : ($this->cfg['language'] === 'ja' ? '.ja' : '')) . '.md';
         }
         return preg_match('#^https?://[^\s<>"]+$#i', $g) ? $g : '';
     }
@@ -5188,6 +5188,144 @@ final class SecurityAlerts
                 'chw_server' => '對方伺服器出錯',
                 'chw_network' => '連不上',
                 'chw_other' => '被拒絕',
+            ),
+            'ja' => array(
+                'header' => "🔒 セキュリティ通知｜%s（%s）",
+                'level_0' => '記録', 'level_1' => '注意', 'level_2' => '緊急',
+                'mail_subject' => 'セキュリティ通知：%s',
+                'ip_count' => '・%s：%d 回',
+                'test_body' => 'これはテストです。これが読めていれば、本当の通知もちゃんと届きます。',
+                'login_fail_title' => '管理画面のログイン失敗が多すぎる',
+                'login_fail_body' => '直近 1 時間で、管理画面のログイン失敗が %d 回ありました（%d 個の IP から）。',
+                'login_fail_real' => '実在する管理者アカウントが狙われています：%s。これらのアカウントに、長いパスワードと 2 段階認証が設定されているか確認してください。',
+                'login_fail_other' => 'ほかに、存在しないアカウント名も %d 個試されました。',
+                'new_device_title' => '管理者「%s」が新しい端末・ネットワークからログインした',
+                'new_device_body' => '%s、IP %s、日時 %s。このアカウントは最近、このブラウザもこのネットワークも使っていませんでした。',
+                'new_device_hint' => 'スタッフがスマホを替えた、外出先でモバイル回線を使った、といったことなら気にしなくて大丈夫です。心当たりがなければ、パスワードを変え、すべての端末からログアウトさせ、最近の管理画面の変更を確認してください。',
+                'acct_title' => '管理者アカウントが変更された',
+                'acct_line' => '%s：%s（操作者：%s）',
+                'acct_created' => 'アカウントの追加', 'acct_deleted' => 'アカウントの削除', 'acct_role' => '役割の変更',
+                'acct_permissions' => '権限の変更', 'acct_email' => 'メールアドレスの変更', 'acct_password' => 'パスワードの変更',
+                'acct_2fa_disabled' => '2 段階認証の無効化', 'acct_passkey_added' => '新しいパスキーの追加', 'acct_other' => '変更あり',
+                'snap_new' => '管理者アカウントが増えました：%s', 'snap_deleted' => '管理者アカウントが削除されました：%s', 'snap_changed' => '%s：%s',
+                'fw_title' => 'ファイアウォールが大量にブロックしている',
+                'fw_body' => '直近 1 時間で %d 回ブロックしました（%d 個の IP から）。', 'fw_rules' => '多かったルール：%s',
+                'money_title_refund' => '返金がいつもと違う', 'money_title_cancel' => '注文のキャンセルがいつもと違う',
+                'money_title_balance_adjust' => '残高の手動調整がいつもと違う',
+                'money_burst' => '直近 1 時間で %d 件、合計 %s。', 'money_actors' => '操作者：%s',
+                'money_single' => '1 件の金額が %s（番号 %s、操作者：%s）。',
+                'file_bad_title' => 'サーバーにバックドアがあるかもしれない',
+                'file_new_bad' => '新規：%s（%s）', 'file_changed_bad' => '変更：%s（%s）', 'file_in_upload' => 'アップロード用フォルダにあるプログラムファイル',
+                'list_sep' => '／',
+                'sus_cmd' => 'システムコマンドを実行できる', 'sus_sysv' => '外から来た内容をシステムコマンドとして実行する',
+                'sus_evalx' => '外から渡されたコードを実行する', 'sus_callin' => '訪問者が指定した関数を何でも実行する',
+                'sus_crfn' => '実行時にコードを組み立てる', 'sus_pregE' => '実行時にコードを組み立てる',
+                'sus_blob' => 'エンコードされた長いデータを含む', 'sus_hex' => 'エンコードされた長いデータを含む',
+                'sus_shell' => '既知のバックドアツールの名前が入っている', 'sus_upin' => '訪問者が指定した場所にアップロードファイルを保存する',
+                'sus_htx' => 'どのファイルをプログラムとして実行するかを変える', 'sus_imgphp' => '画像のふりをしたプログラム',
+                'sus_custom' => '自分で追加したルール「%s」に一致',
+                'sus_stealth' => '中身が変わったのに、変更を隠すように更新日時が元に戻されている',
+                'late_title' => '送信が遅れた通知',
+                'late_note' => '⏱ 遅れて届いた通知：これは %s の通知です。そのときはどのチャネルでも送れなかったので、今お送りしています。',
+                'late_expired' => '%s の通知は 7 日間送れなかったため、送るのをあきらめました。内容は上の記録にあります。',
+                'file_more' => '…ほかに %d 本',
+                'file_new_quarantined' => '新規：%s（%s）→ %s に名前を変更',
+                'file_quarantine_hint' => '名前を変えたファイルは、もう実行されません。削除はしていません。相手がどうやって入ってきたかを示す証拠だからです。身内が置いたものなら、名前を元に戻してください。',
+                'file_quarantine_failed' => '自動で名前を変えようとしましたが、失敗しました（権限がない）。そのファイルはまだ実行できます。',
+                'file_algo_title' => 'ファイルの指紋が SHA-256 に移行された',
+                'file_algo_body' => 'モジュールの更新後、%d 本のプログラムファイルの指紋を SHA-256 で計算し直しました（以前は SHA-1）。先に各ファイルを古い指紋と照合し、変わっていないものは黙って移行し、変わっていたものはいつもどおり通知します。',
+                'file_algo_hint' => 'このお知らせは、更新の直後に一度だけ届きます。誰もモジュールを更新していないのに届いたなら、誰かが記録を古い形式のものに差し替えています。侵入として扱ってください。',
+                'file_bad_hint' => '今すぐこれらのファイルを確認してください。自分たちで置いたものでなければ、サイトを止めて、きれいなバックアップから戻してください。',
+                'file_title' => 'サーバーのプログラムファイルが変わった',
+                'file_summary' => '新規 %d 本、変更 %d 本、削除 %d 本。',
+                'file_plain_hint' => '自分たちでアップロードした更新なら、このメッセージは気にしなくて大丈夫です。',
+                'file_runtime_title' => 'サイトが自分で書き換えたファイル',
+                'file_reset_title' => 'ファイルの基準が手動でリセットされた',
+                'file_reset_body' => '%s に、誰かが --rebaseline（基準のリセット）を実行しました。これからは、今あるファイルがすべて正常とみなされます。あなたか開発者がしたのでなければ、侵入として扱ってください。',
+                'file_lost_title' => 'ファイルの指紋の記録が消えた',
+                'file_lost_body' => 'プログラムファイルの状態を記録したデータが、消えたか読めなくなっています。リセットの指示は誰も出していません。前回のチェック以降に何が変わったかは、もう一覧にできません。',
+                'file_lost_hint' => '記録を消すのは、侵入者が監視を無効にするときの手口です。この間に誰がサーバーを触ったかを確認し、最後のきれいなバックアップとサイトを比べ、パスワードを変えてください。監視は今の状態から始め直します。',
+                'state_lost_title' => '監視の記録が消された',
+                'state_lost_body' => '監視が空の記録フォルダから始まりましたが、このサイトには前から入っていました（%s から）。',
+                'hb_header' => "✅ 週 1 回の動作報告｜%s（%s）",
+                'hb_title' => '週 1 回の動作報告',
+                'hb_counts' => '監視はまだ動いています。過去 %d 日間：チェック %d 回、報告 %d 件（うち緊急 %d 件）。',
+                'hb_files' => 'プログラムファイル %d 本を見張っています（前回すべて読み直したのは %s）。',
+                'hb_header_warn' => "⚠️ 週 1 回の動作報告（確認してほしいことがあります）｜%s（%s）",
+                'hb_fp_first' => 'コード指紋：%s。これからは毎回の動作報告に付くので、さかのぼれば前回のものと見比べられます。',
+                'hb_fp_same' => 'コード指紋：%s（前回の動作報告と同じ。この間、プログラムは変わっていません）。',
+                'hb_fp_diff_sent' => 'コード指紋：%s（前回は %s）。この間にプログラム変更の通知を %d 通送りました。どれも自分たちの作業なら問題ありません。',
+                'hb_fp_diff_quiet' => 'コード指紋：%s（前回は %s）。この間の %d 件の変更は記録に書いただけで、あなたには送っていません。開発者に記録を見てもらってください。',
+                'hb_fp_diff_none' => '⚠ コード指紋：%s（前回は %s）。変わっているのに、この間のプログラムの変更が記録にありません。指紋の記録が書き換えられた可能性があります。「バックドアがあるかもしれない」ときと同じ対応をしてください。',
+                'hb_ping_ok' => '外部チェックイン：正常（定期実行が止まれば、そのサービスが知らせてくれます）。',
+                'hb_quota' => '今月の LINE の送信数：約 %d 通（上限 %d 通）。',
+                'hb_quota_low' => '⚠ 今月の LINE の送信数：約 %d 通（上限 %d 通）。上限に達すると LINE では届かなくなり、通知はほかのチャネル（Telegram、Discord、メール）に回るか、送れるようになるまで待つことになります。',
+                'hb_quota_out' => '⚠ 今月の LINE の送信数：上限の %d 通を使い切りました（送信は約 %d 通）。来月になるかプランを上げるまで、通知は LINE に届きません。ほかのチャネル（メール、Telegram、Discord）が設定されているか確認してください。',
+                'hb_ping_bad' => '⚠ 外部チェックインの URL への報告が %d 回続けて失敗しています（%s から）。開発者に ping_url を確認してもらってください。このままでは、定期実行が止まっても誰も知らせてくれません。',
+                'hb_since' => '記録の開始日：%s。覚えているより新しい日付なら、記録がリセットされています。理由を確認してください。',
+                'hb_hint' => 'このメッセージは週に 1 回届きます。届かない週があれば、チェックが止まっています。',
+                'hb_friends' => '⚠ この通知を送っているLINE公式アカウントには、友だちが約 %d 人います。そのトークンはこのサーバーにあるので、侵入した人はその全員にメッセージを送れてしまいます。通知は、通知専用のLINE公式アカウントから送ってください（README を参照）。',
+                'exp_title' => '予告した更新の時間内に変わったプログラム',
+                'exp_opened' => '更新を予告しました：%s から %s まで。',
+                'exp_window' => '予告された更新の時間：%s～%s（サーバーで --expect を使って予告）。',
+                'exp_none' => 'この時間内に変わったプログラムファイルはありません。',
+                'exp_hint' => '自分たちの更新なら問題ありません。その時間に誰も更新していなければ、侵入として扱ってください。サーバーに入った誰かが、これらの変更を隠すために予告したのかもしれません。',
+                'page_home' => 'トップページ',
+                'page_code_title' => 'ページがほかのサイトを使い始めた',
+                'page_new_script' => '%s：%s のプログラムを読み込んでいます',
+                'page_new_frame' => '%s：%s を埋め込んでいます',
+                'page_new_form' => '%s：フォームに入力された内容が %s へ送られるようになりました',
+                'page_new_redirect' => '%s：訪問者を %s へ転送しています',
+                'page_code_hint' => 'あなたや開発者が追加したばかりのもの（チャット、決済、アクセス解析などのサービス）でなければ、誰かがサイトの設定やデータベースに仕込み、お客さんの入力内容を盗むか、お客さんをよそへ送ろうとしているのかもしれません。どこから来ているかを開発者に探してもらってください。自分たちのものなら、そのサイトを page_allow に入れれば次からは知らせません。サイト名が name[.]com のように書かれているのはわざとで、タップで開かないようにするためです。',
+                'page_hidden_title' => 'ページが検索エンジンにだけ違うものを見せている',
+                'page_hidden_line' => '%s：%sにだけ %s が出ています',
+                'page_who_c' => '検索エンジン', 'page_who_g' => 'Google 検索から来たお客さん', 'page_who_cg' => '検索エンジンと、Google 検索から来たお客さん',
+                'page_hidden_hint' => 'ギャンブルやスパムリンクを仕込む侵入が隠れる、典型的な手口です。自分で開くと普通に見えるのに、Google には別のものが見えています（または、お客さんが別の場所へ送られています）。開発者に、データベース（記事、設定、フッター）とプログラムの中でこれらのサイト名を探して取り除いてもらい、そのあと Google Search Console で審査を依頼してください。サイト名が name[.]com のように書かれているのはわざとで、タップで開かないようにするためです。',
+                'page_links_title' => 'ページにほかのサイトへの新しいリンクが増えた',
+                'page_new_links' => '%s：%s',
+                'page_links_hint' => '自分やスタッフが追加したもの（新しい記事、取引先など）なら問題ありません。誰も追加していなければ、リンクを仕込まれたのかもしれないので、そのページを確認してください。サイト名が name[.]com のように書かれているのはわざとで、タップで開かないようにするためです。',
+                'page_more' => '…ほかに %d 件',
+                'page_and_more' => '（ほか %d 件）',
+                'page_data_url' => 'data: URL（ページに直接書き込まれたコード）',
+                'page_lost_title' => 'ページ監視の記録が消えた',
+                'page_lost_body' => '記録していたページの状態がなくなりました。次のチェックは、今のページの状態から始め直します。誰も監視をリセットしていなければ、誰かが痕跡を消そうとしているのかもしれません。',
+                'brake_line' => "\u{1F6D1} 自分たちがしたことではなく、開発者にも連絡がつかないときは、管理画面を %d 時間ロックできます（お店はそのまま営業）：%s",
+                'brake_title' => '緊急ブレーキ',
+                'brake_confirm' => 'ボタンを押すと、管理画面が %d 時間ロックされます。その間は、あなたも含めて誰もログインも操作もできません。お客さんはいつもどおり買い物できます。通知で異常を知らされたのに、開発者に連絡がつかないときに使ってください。',
+                'brake_button' => '管理画面を %d 時間ロックする',
+                'brake_already' => 'すでに %s までロックされています。ボタンを押しても、少なくともその時刻まではロックが続きます。',
+                'brake_done' => '%s までロックしました。お店はそのまま開いています。ロックしたことを知らせるメッセージがまもなく届きます。開発者はサーバーで --unlock を実行すれば、早めに解除できます。',
+                'brake_expired' => 'このリンクは期限切れです（リンクが使えるのは発行から %d 時間です）。もっと新しい通知のリンクを使うか、開発者にサーバーで --lock を実行して管理画面をロックしてもらってください。',
+                'brake_used' => 'このリンクはすでに使われています。管理画面は %s までロックされています。',
+                'brake_used_open' => 'このリンクはすでに使われていて、そのときのロックはもう終わっています。もう一度ロックするには、もっと新しい通知のリンクを使ってください。',
+                'brake_locked_title' => '管理画面がロックされた',
+                'brake_locked_link' => '%s に緊急ブレーキのリンクでロックされました（%s まで、IP %s から押されました）。お客さんはいつもどおり買い物できますが、それまでは誰も管理画面を使えません。',
+                'brake_locked_cmd' => '%s に、サーバーのコマンドでロックされました（%s まで）。お客さんはいつもどおり買い物できますが、それまでは誰も管理画面を使えません。',
+                'brake_locked_hint' => '自分たちの誰もしていないなら、誰かがあなたの通知メッセージを読めるか、すでにサーバーに入っています。開発者に伝えてください。早めに解除するには、サーバーで --unlock を実行します。',
+                'brake_unlocked_title' => '管理画面のロックが解除された',
+                'brake_unlocked_body' => '%s に、サーバーのコマンドで緊急ロックが解除されました。',
+                'btn_brake' => "\u{1F6D1} 管理画面を %d 時間ロック",
+                'btn_guide' => "\u{1F4D6} 通知が届いたら",
+                'what_to_do' => 'どうするか',
+                'name_sep' => '、',
+                'hb_channels_ok' => '通知チャネルは正常です：%s（メッセージは送らずに確かめました）。',
+                'hb_channels_bad' => '⚠ 今使えないチャネルがあります：%s。そこに送るはずのメッセージは、次のチャネルに回るか、送れるまで保管されます。開発者に --test-all を実行してもらってください。',
+                'ch_with_reason' => '%s（%s）',
+                'ch_name_telegram' => 'Telegram', 'ch_name_discord' => 'Discord', 'ch_name_line' => 'LINE', 'ch_name_mail' => 'メール', 'ch_name_custom' => '自作の通知チャネル',
+                'chw_blocked' => 'ボットがブロックされた',
+                'chw_kicked' => 'ボットがグループから外された',
+                'chw_chat_not_found' => 'チャットが見つからない',
+                'chw_topic_gone' => 'トピックが見つからない',
+                'chw_forum_thread' => 'フォーラムの投稿を thread_id で指定していないか、その投稿がなくなった',
+                'chw_token' => 'キーが間違っているか、無効にされた',
+                'chw_webhook_gone' => 'ウェブフックが削除された',
+                'chw_webhook_bad' => 'ウェブフックの URL が間違っている',
+                'chw_recipient_gone' => '送り先の誰かがアカウントをブロックしたか、友だちになっていない',
+                'chw_quota' => '今月の送信数の上限に達した',
+                'chw_rate' => 'リクエストが多すぎて一時的に止められた',
+                'chw_server' => 'サービス側でエラーが起きた',
+                'chw_network' => '応答がない',
+                'chw_other' => '拒否された',
             ),
         );
         $lang = isset($s[$this->cfg['language']]) ? $this->cfg['language'] : 'en';
