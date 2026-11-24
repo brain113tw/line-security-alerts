@@ -1,7 +1,7 @@
 {
   "name": "line-security-alerts",
   "description": "Security alerts for PHP websites, pushed to LINE (Telegram and Discord built in too): suspicious admin logins, admin account changes, new or modified code files and web shells, firewall bursts, unusual refunds, and pages that start loading code or links from other sites (card skimming, spam shown only to Google). Silent when nothing is wrong.",
-  "version": "1.5.0",
+  "version": "1.6.0",
   "author": { "name": "沂恩精緻洗衣 EN Laundry" },
   "homepage": "https://github.com/brain113tw/line-security-alerts",
   "repository": "https://github.com/brain113tw/line-security-alerts",

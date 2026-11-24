@@ -29,7 +29,7 @@ Read these when you need them:
 - [reference/hardening-checklist.md](reference/hardening-checklist.md) / [繁體中文](reference/hardening-checklist.zh-TW.md) / [日本語](reference/hardening-checklist.ja.md) — the prevention side: what makes a break-in less likely in the first place
 - [reference/line-setup.md](reference/line-setup.md) — getting a channel access token and the user/group ID
 - [examples/](examples/) — a config template, the cron entry point (`--status`, `--test`, `--test-all`, `--telegram-chats`, `--audit`, `--pages`, `--expect 30m` / `--expect off`, `--lock` / `--unlock`, `--fingerprint`, `--manifest`, `--rebaseline`) and the optional emergency-brake page (`security-brake.php`)
-- `scripts/selftest.php` — 315 checks, no network; `scripts/fake_line_server.php` — a local stand-in for LINE, Telegram, Discord, the check-in service, a webhook, and a small shop that can be switched to "hacked" (`/shop/hack`) for trying the page watch
+- `scripts/selftest.php` — 322 checks, no network; `scripts/fake_line_server.php` — a local stand-in for LINE, Telegram, Discord, the check-in service, a webhook, and a small shop that can be switched to "hacked" (`/shop/hack`) for trying the page watch
 - `scripts/fingerprint.php` — the code fingerprint of any folder, to compare a clean local copy with the one the server reports
 - `scripts/demo.php` — replays a few days at a small shop and prints the exact messages the owner
   would get (`--lang=zh-TW` or `--lang=ja`, `--site="Their shop"`). Run it and show the output when the user asks

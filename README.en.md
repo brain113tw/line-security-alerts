@@ -228,6 +228,8 @@ An announcement is no cover:
 - A window lasts at most 4 hours. Even if someone on the server secretly writes "expect changes until
   2099", the summary still comes 4 hours later and lists what they changed.
 - The summary ends with: if nobody updated the site at that time, treat it as a break-in.
+- Opening or extending a window sends a notice at once ("Update window opened", quiet by default),
+  so a window nobody on your team opened is seen while it is still open.
 
 With automated deployments, put `--expect 20m` at the start of the deploy and `--expect off` at the end.
 
@@ -299,7 +301,7 @@ send one real test message.
 **To install a fixed, reviewed version** (advisable for a security tool), add the release tag:
 
 ```
-/plugin marketplace add brain113tw/line-security-alerts#v1.5.0
+/plugin marketplace add brain113tw/line-security-alerts#v1.6.0
 /plugin install line-security-alerts@line-security-tools
 ```
 
@@ -520,7 +522,7 @@ The full list is `SecurityAlerts::defaults()`. Thresholds are starting points â€
 php skills/line-security-alerts/scripts/selftest.php
 ```
 
-315 scenario checks (logins, devices, accounts, firewall, money, files, web-shell patterns, weekly
+322 scenario checks (logins, devices, accounts, firewall, money, files, web-shell patterns, weekly
 check-in and fingerprint, wiped or edited records, upgrading old fingerprints, outside check-in,
 quarantine, timestamps put back, delayed delivery, non-UTF-8 names, daily cap, e-mail fallback,
 Telegram / Discord order, long messages in parts, "too many requests", update windows, LINE friend

@@ -188,6 +188,8 @@ for 4 hours" under the message; on Discord, the link in the last card.)
 cannot reach your developer. Tap the link and press the button on the page. The admin area is then
 locked for a few hours — nobody can use it, including whoever broke in and your own staff — while
 customers keep shopping. Opening the link alone does nothing; only the button locks.
+If the page says the link "has been replaced", a newer URGENT alert has arrived since: use the link
+in the latest one (only the newest link works, by default for 12 hours).
 
 Then keep trying to reach your developer. Only they can unlock it early (on the server). If you are
 unsure, pressing is the safe side: the worst outcome is a few hours without the admin area.
@@ -199,6 +201,15 @@ developer locked the admin area from the server.
 
 **Do**: if it was you, nothing more — wait for your developer. **If nobody on your side pressed it**,
 someone can read your alert messages or is on the server: tell your developer today.
+
+## 【Notice】 Update window opened / Update window extended
+
+**Meaning**: someone just ran `--expect` on the server. Until the time shown, ordinary code changes
+are collected into one summary; anything that looks like a backdoor is still reported at once.
+
+**Do**: is your developer (or your deployment) updating the site right now? Then nothing to do. **If
+nobody on your side announced an update**, someone on the server may be about to change files under
+cover of the window: tell your developer now and follow "Possible backdoor" above.
 
 ## 【Notice】 Code changes during your announced update
 

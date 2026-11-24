@@ -1,6 +1,8 @@
 # Changelog / 更新紀錄
 
-## Unreleased (1.6.0) — hardening from a security review
+## 1.6.0 — 2026-11-25
+
+Hardening after a security review of the tool itself. 資安清查之後的補強。
 
 - **Emergency brake links**: only the newest link works — issuing one makes the older ones answer
   "replaced" — and `brake_link_hours` now defaults to 12 (was 24). An alert waiting to be re-sent is kept

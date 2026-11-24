@@ -48,7 +48,7 @@ final class SecurityAlerts
     const NOTICE = 1;   // worth a message
     const URGENT = 2;   // send even if the daily cap is reached
     const BRAKE_MARK = "\u{1F6D1} ";   // starts the emergency-brake line at the end of an URGENT message
-    const VERSION = '1.5.0';
+    const VERSION = '1.6.0';
 
     /** @var array */
     private $cfg;

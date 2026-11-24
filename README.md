@@ -187,6 +187,7 @@ php security-alerts-cron.php --expect 30m
 - 內容像後門的檔、上傳資料夾裡的程式、改完把時間調回去的檔，在預告時段內**照樣立刻緊急通知**。
 - 一個時段最長 4 小時。就算有人在主機上偷偷寫了「預告到 2099 年」，4 小時後還是會發出那一則，列出他改了哪些檔。
 - 那一則最後寫著：如果那段時間其實沒有人更新網站，請當成被入侵處理。
+- 預告一開始、每次延長，都會馬上發一則「開始上傳預告」（預設不讓手機響）。不是自己人開的，當下就看得到，不用等到時段結束。
 
 用自動部署的話，可以把 `--expect 20m` 放在部署指令的最前面、`--expect off` 放在最後面。
 
@@ -259,7 +260,7 @@ Claude 會先找出你網站的登入、帳號管理、上傳資料夾等位置�
 **想裝固定、看過的版本**（資安工具建議這樣裝）：在網址後面加上版本標籤。
 
 ```
-/plugin marketplace add brain113tw/line-security-alerts#v1.5.0
+/plugin marketplace add brain113tw/line-security-alerts#v1.6.0
 /plugin install line-security-alerts@line-security-tools
 ```
 
@@ -462,7 +463,7 @@ Discord 每個網站用自己的討論串（`?thread_id=`）或自己的 Webhook
 php skills/line-security-alerts/scripts/selftest.php
 ```
 
-315 項情境測試（登入、裝置、帳號、防火牆、金額、檔案、後門樣式、每週報平安與總指紋、紀錄被清空或被改、
+322 項情境測試（登入、裝置、帳號、防火牆、金額、檔案、後門樣式、每週報平安與總指紋、紀錄被清空或被改、
 舊版指紋升級、外部報到、自動隔離、時間被調回去、補發、非 UTF-8 檔名、每日上限、Email 備援、
 Telegram／Discord 的發送順序、太長分段、請求太多要等、預告時段、LINE 好友數、
 網頁監看的四種讀法與只給爬蟲看的連結、緊急煞車、只有緊急的會響、Telegram 排版與按鈕、Discord 卡片、
